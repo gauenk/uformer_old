@@ -32,13 +32,12 @@ def load_checkpoint(model, weights):
             new_state_dict[name] = v
         model.load_state_dict(new_state_dict)
 
-
 def load_checkpoint_multigpu(model, weights):
     checkpoint = torch.load(weights)
     state_dict = checkpoint["state_dict"]
     new_state_dict = OrderedDict()
     for k, v in state_dict.items():
-        name = k[7:] 
+        name = k[7:]
         new_state_dict[name] = v
     model.load_state_dict(new_state_dict)
 

@@ -1,8 +1,12 @@
 
 # -- misc --
 import os,math,tqdm
+from skimage.metrics import structural_similarity as compute_ssim_ski
 import pprint
 pp = pprint.PrettyPrinter(indent=4)
+
+# -- vision --
+from PIL import Image
 
 # -- linalg --
 import numpy as np
@@ -33,6 +37,9 @@ def run_exp(cfg):
     # -- init results --
     results = edict()
     results.psnrs = []
+    results.ssims = []
+    results.noisy_psnrs = []
+    results.noisy_ssims = []
     results.adapt_psnrs = []
     results.deno_fns = []
     results.vid_frames = []
@@ -42,24 +49,24 @@ def run_exp(cfg):
     results.timer_deno = []
 
     # -- network --
-    model = uformer.batched.load_model(cfg.sigma).to(cfg.device)
+    model = uformer.original.load_model().to(cfg.device)
     model.eval()
+    imax = 255.
 
     # -- data --
     data,loaders = data_hub.sets.load(cfg)
     data,loaders = data_hub.sets.load(cfg)
-    groups = data.te.groups
-    indices = [i for i,g in enumerate(groups) if cfg.vid_name in g]
-    def fbnds(fnums,lb,ub): return (lb <= np.min(fnums)) and (ub >= np.max(fnums))
-    indices = [i for i in indices if fbnds(data.te.paths['fnums'][groups[i]],
-                                           cfg.frame_start,cfg.frame_end)]
+    groups = data.val.groups
+    indices = [i for i,g in enumerate(groups) if cfg.vid_name == g]
+
+    # -- each subsequence with video name --
     for index in indices:
 
         # -- clean memory --
         th.cuda.empty_cache()
 
         # -- unpack --
-        sample = data.te[index]
+        sample = data.val[index]
         noisy,clean = sample['noisy'],sample['clean']
         noisy,clean = noisy.to(cfg.device),clean.to(cfg.device)
         vid_frames = sample['fnums']
@@ -103,26 +110,29 @@ def run_exp(cfg):
         batch_size = 390*100
         timer.start("deno")
         with th.no_grad():
-            deno = model(noisy,cfg.sigma,flows=flows,
-                         ws=cfg.ws,wt=cfg.wt,batch_size=batch_size)
+            deno = model(noisy/imax)
+            # deno = model(noisy,cfg.sigma,flows=flows,
+            #              ws=cfg.ws,wt=cfg.wt,batch_size=batch_size)
+            deno = th.clamp(deno,0.,1.)*imax
         timer.stop("deno")
 
         # -- save example --
-        out_dir = Path(cfg.saved_dir) / str(cfg.uuid)
+        out_dir = Path(cfg.saved_dir)
         deno_fns = uformer.utils.io.save_burst(deno,out_dir,"deno")
+        uformer.utils.io.save_burst(clean,out_dir,"clean")
+        uformer.utils.io.save_burst(noisy,out_dir,"noisy")
 
         # -- psnr --
-        t = clean.shape[0]
-        deno = deno.detach()
-        clean_rs = clean.reshape((t,-1))/255.
-        deno_rs = deno.reshape((t,-1))/255.
-        mse = th.mean((clean_rs - deno_rs)**2,1)
-        psnrs = -10. * th.log10(mse).detach()
-        psnrs = list(psnrs.cpu().numpy())
-        print(psnrs)
+        noisy_psnrs = compute_psnr(clean,noisy,div=imax)
+        psnrs = compute_psnr(clean,deno,div=imax)
+        noisy_ssims = compute_ssim(clean,noisy,div=imax)
+        ssims = compute_ssim(clean,deno,div=imax)
 
         # -- append results --
+        results.noisy_psnrs.append(noisy_psnrs)
         results.psnrs.append(psnrs)
+        results.noisy_ssims.append(noisy_ssims)
+        results.ssims.append(ssims)
         results.adapt_psnrs.append(adapt_psnrs)
         results.deno_fns.append(deno_fns)
         results.vid_frames.append(vid_frames)
@@ -132,21 +142,67 @@ def run_exp(cfg):
 
     return results
 
+def compute_ssim(clean,deno,div=255.):
+    nframes = clean.shape[0]
+    ssims = []
+    for t in range(nframes):
+        clean_t = clean[t].cpu().numpy().squeeze().transpose((1,2,0))/div
+        deno_t = deno[t].cpu().numpy().squeeze().transpose((1,2,0))/div
+        ssim_t = compute_ssim_ski(clean_t,deno_t,channel_axis=-1)
+        ssims.append(ssim_t)
+    ssims = np.array(ssims)
+    return ssims
+
+def prepare_sidd(records):
+
+    # -- load denoised files --
+    deno_all_fns = list(np.stack(records['deno_fns'].to_numpy()))
+    denos = []
+    for deno_vid_fns in deno_all_fns:
+        deno_vid = []
+        for fn_t in deno_vid_fns:
+            frame_t = np.array(Image.open(fn_t))
+            deno_vid.append(frame_t)
+        deno_vid = np.stack(deno_vid)
+        denos.append(deno_vid)
+    denos = np.stack(denos)
+    ntotal = np.prod(denos.shape)
+
+    # -- average time --
+    times = list(np.stack(records['timer_deno'].to_numpy()))
+    times_mp = []
+    for vid_times in times:
+        vid_time = np.mean(vid_times)
+        times_mp.append(vid_time)
+    time_mp = np.mean(times_mp)
+    time_mp = time_mp * 1024 * 1024 / ntotal
+    print(time_mp)
+    print(denos.shape)
+
+    # -- save mat file --
+
+
+def compute_psnr(clean,deno,div=255.):
+    t = clean.shape[0]
+    deno = deno.detach()
+    clean_rs = clean.reshape((t,-1))/div
+    deno_rs = deno.reshape((t,-1))/div
+    mse = th.mean((clean_rs - deno_rs)**2,1)
+    psnrs = -10. * th.log10(mse).detach()
+    psnrs = psnrs.cpu().numpy()
+    return psnrs
 
 def default_cfg():
     # -- config --
     cfg = edict()
-    cfg.nframes = 5
+    cfg.nframes = 0
     cfg.frame_start = 0
-    cfg.frame_end = 4
-    cfg.saved_dir = "./output/saved_results/"
-    cfg.checkpoint_dir = "/home/gauenk/Documents/packages/uformer/output/checkpoints/"
-    cfg.isize = None
+    cfg.frame_end = 1000
+    # cfg.saved_dir = "./output/saved_results/"
+    cfg.saved_dir = "./output/saved_results/sidd_bench"
     cfg.num_workers = 1
     cfg.device = "cuda:0"
-    # cfg.isize = "512_512"
-    # cfg.isize = "256_256"
-    # cfg.isize = "128_128"
+    cfg.sigma = 50. # use large sigma to approx real noise for optical flow
     return cfg
 
 def main():
@@ -158,43 +214,26 @@ def main():
 
     # -- get cache --
     cache_dir = ".cache_io"
-    cache_name = "test_rgb_net" # current!
+    # cache_name = "test_rgb_net"
+    cache_name = "sidd_rgb_bench"
     cache = cache_io.ExpCache(cache_dir,cache_name)
     # cache.clear()
 
     # -- get mesh --
-    # dnames = ["toy"]
-    # vid_names = ["text_tourbus"]
-    # mtypes = ["rand"]
-    mtypes = ["rand","sobel"]
-    dnames = ["set8"]
-    vid_names = ["snowboard","sunflower","tractor","motorbike",
-                 "hypersmooth","park_joy","rafting","touchdown"]
-    # vid_names = ["tractor"]
-    sigmas = [30,50]#,50]
+    dnames = ["sidd_rgb_bench"]
+    vid_names = ["%02d" % x for x in np.arange(0,40)]
     internal_adapt_nsteps = [300]
-    internal_adapt_nepochs = [5]
-    # ws,wt = [29],[0]
+    internal_adapt_nepochs = [0]
+    flow = ["false"]
     ws,wt = [7],[10]
-    flow = ["true"]
-    isizes = [None,"512_512","256_256"]
-    exp_lists = {"dname":dnames,"vid_name":vid_names,"sigma":sigmas,
+    mtypes = ["rand","sobel"]
+    isizes = ["none"]
+    exp_lists = {"dname":dnames,"vid_name":vid_names,
                  "internal_adapt_nsteps":internal_adapt_nsteps,
                  "internal_adapt_nepochs":internal_adapt_nepochs,
-                 "flow":flow,"ws":ws,"wt":wt,"adapt_mtype":mtypes,"isize":isizes}
+                 "flow":flow,"ws":ws,"wt":wt,
+                 "adapt_mtype":mtypes,"isize":isizes}
     exps = cache_io.mesh_pydicts(exp_lists) # create mesh
-    # ws,wt = [29],[0]
-    # flow = ["false"]
-    # exp_lists = {"dname":dnames,"vid_name":vid_names,"sigma":sigmas,
-    #              "internal_adapt_nsteps":internal_adapt_nsteps,
-    #              "internal_adapt_nepochs":internal_adapt_nepochs,
-    #              "flow":flow,"ws":ws,"wt":wt,"adapt_mtype":mtypes}
-    # exps += cache_io.mesh_pydicts(exp_lists) # create mesh
-
-    # pp.pprint(exps)
-    # for exp in exps:
-    #     if exp.internal_adapt_nsteps == 0:
-    #         exp.internal_adapt_nepochs = 2
 
     # -- group with default --
     cfg = default_cfg()
@@ -203,6 +242,8 @@ def main():
     # -- run exps --
     nexps = len(exps)
     for exp_num,exp in enumerate(exps):
+
+        break
 
         # -- info --
         if verbose:
@@ -222,8 +263,19 @@ def main():
 
     # -- load results --
     records = cache.load_flat_records(exps)
+    prepare_sidd(records)
+    exit(0)
     print(records)
     print(records.filter(like="timer"))
+    print(records['psnrs'].mean())
+    ssims = np.stack(np.array(records['ssims']))
+    psnrs = np.stack(np.array(records['psnrs']))
+    print(ssims)
+    print(psnrs)
+    print(psnrs.shape)
+    print(psnrs.mean())
+    print(ssims.mean())
+    exit(0)
 
     # -- print by dname,sigma --
     for dname,ddf in records.groupby("dname"):

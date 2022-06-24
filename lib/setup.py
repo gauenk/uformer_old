@@ -26,6 +26,6 @@ setup(
     author_email='gauenk@purdue.edu',
     license='MIT',
     keywords='burst denoising, non-local search, video denoising, neural network',
-    install_requires=['numpy','torch','flake8','vpss'],
+    install_requires=['numpy','torch','flake8','dnls'],
     packages=find_packages(),
 )
