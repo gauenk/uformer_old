@@ -1,11 +1,13 @@
 
 # -- misc --
-import os,math,tqdm
+import os,math,tqdm,h5py
+import hdf5storage
 from skimage.metrics import structural_similarity as compute_ssim_ski
 import pprint
 pp = pprint.PrettyPrinter(indent=4)
 
 # -- vision --
+import scipy.io
 from PIL import Image
 
 # -- linalg --
@@ -70,6 +72,7 @@ def run_exp(cfg):
         noisy,clean = sample['noisy'],sample['clean']
         noisy,clean = noisy.to(cfg.device),clean.to(cfg.device)
         vid_frames = sample['fnums']
+        fstart = min(vid_frames)
         # print("[%d] noisy.shape: " % index,noisy.shape)
 
         # -- create timer --
@@ -117,10 +120,14 @@ def run_exp(cfg):
         timer.stop("deno")
 
         # -- save example --
-        out_dir = Path(cfg.saved_dir)
-        deno_fns = uformer.utils.io.save_burst(deno,out_dir,"deno")
-        uformer.utils.io.save_burst(clean,out_dir,"clean")
-        uformer.utils.io.save_burst(noisy,out_dir,"noisy")
+        out_dir = Path(cfg.saved_dir) / cfg.vid_name
+        print(out_dir,deno.min(),deno.max())
+        deno_fns = uformer.utils.io.save_burst(deno,out_dir,"deno",
+                                               fstart=fstart,div=1.,fmt="np")
+        # uformer.utils.io.save_burst(clean,out_dir,"clean",
+        #                             fstart=fstart,div=1.,fmt="np")
+        # uformer.utils.io.save_burst(noisy,out_dir,"noisy",
+        #                             fstart=fstart,div=1.,fmt="np")
 
         # -- psnr --
         noisy_psnrs = compute_psnr(clean,noisy,div=imax)
@@ -161,7 +168,10 @@ def prepare_sidd(records):
     for deno_vid_fns in deno_all_fns:
         deno_vid = []
         for fn_t in deno_vid_fns:
-            frame_t = np.array(Image.open(fn_t))
+            if "png" in fn_t:
+                frame_t = np.array(Image.open(fn_t))
+            else:
+                frame_t = np.load(fn_t).transpose(1,2,0)
             deno_vid.append(frame_t)
         deno_vid = np.stack(deno_vid)
         denos.append(deno_vid)
@@ -176,11 +186,19 @@ def prepare_sidd(records):
         times_mp.append(vid_time)
     time_mp = np.mean(times_mp)
     time_mp = time_mp * 1024 * 1024 / ntotal
-    print(time_mp)
-    print(denos.shape)
+    # print(time_mp)
+    # print(denos.shape)
 
-    # -- save mat file --
+    # -- filenames --
+    fn_og = "output/sidd_submit/SubmitSrgbFromMatlab.mat"
+    fn = "output/sidd_submit/SubmitSrgb.mat"
+    os.remove(fn) # remove old
 
+    # -- read --
+    data = hdf5storage.loadmat(fn_og)
+    del data['DenoisedBlocksSrgb']
+    data['DenoisedBlocksSrgb'] = denos
+    hdf5storage.savemat(fn,data)
 
 def compute_psnr(clean,deno,div=255.):
     t = clean.shape[0]
@@ -198,7 +216,7 @@ def default_cfg():
     cfg.nframes = 0
     cfg.frame_start = 0
     cfg.frame_end = 1000
-    # cfg.saved_dir = "./output/saved_results/"
+    # cfg.saved_dir = "./output/saved_results/sidd_rgb"
     cfg.saved_dir = "./output/saved_results/sidd_bench"
     cfg.num_workers = 1
     cfg.device = "cuda:0"
@@ -210,7 +228,7 @@ def main():
     # -- (0) start info --
     verbose = True
     pid = os.getpid()
-    print("PID: ",pid)
+    # print("PID: ",pid)
 
     # -- get cache --
     cache_dir = ".cache_io"
@@ -220,13 +238,14 @@ def main():
     # cache.clear()
 
     # -- get mesh --
+    # dnames = ["sidd_rgb"]
     dnames = ["sidd_rgb_bench"]
     vid_names = ["%02d" % x for x in np.arange(0,40)]
     internal_adapt_nsteps = [300]
     internal_adapt_nepochs = [0]
     flow = ["false"]
     ws,wt = [7],[10]
-    mtypes = ["rand","sobel"]
+    mtypes = ["rand"]
     isizes = ["none"]
     exp_lists = {"dname":dnames,"vid_name":vid_names,
                  "internal_adapt_nsteps":internal_adapt_nsteps,
@@ -242,8 +261,6 @@ def main():
     # -- run exps --
     nexps = len(exps)
     for exp_num,exp in enumerate(exps):
-
-        break
 
         # -- info --
         if verbose:
