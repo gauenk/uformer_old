@@ -57,7 +57,6 @@ def run_exp(cfg):
 
     # -- data --
     data,loaders = data_hub.sets.load(cfg)
-    data,loaders = data_hub.sets.load(cfg)
     groups = data.val.groups
     indices = [i for i,g in enumerate(groups) if cfg.vid_name == g]
 

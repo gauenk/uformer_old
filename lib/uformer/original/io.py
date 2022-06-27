@@ -56,4 +56,7 @@ def load_model(*args,**kwargs):
     # load_checkpoint(model,model_state)
     # model.load_state_dict(model_state['state_dict'])
 
+    # -- eval mode as default --
+    model.eval()
+
     return model
