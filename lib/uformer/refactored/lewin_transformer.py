@@ -305,7 +305,7 @@ class LeWinTransformerBlockRefactored(nn.Module):
         shortcut = x
         x = self.norm1(x)
         x = x.view(B, H, W, C)
-        print("[ref]: ",x.shape)
+        # print("[ref]: ",x.shape)
 
         # cyclic shift
         if self.shift_size > 0:
@@ -316,12 +316,12 @@ class LeWinTransformerBlockRefactored(nn.Module):
         # partition windows
         x_windows = window_partition(shifted_x, self.win_size, coords=coords)  # nW*B, win_size, win_size, C  N*C->C
         x_windows = x_windows.view(-1, self.win_size * self.win_size, C)  # nW*B, win_size*win_size, C
-        print("x_windows.shape: ",x_windows.shape)
+        # print("x_windows.shape: ",x_windows.shape)
 
         # W-MSA/SW-MSA
-        print("pre-attn.")
+        # print("pre-attn.")
         attn_windows = self.attn(x_windows, mask=attn_mask)  # nW*B, win_size*win_size, C
-        print("post-attn.")
+        # print("post-attn.")
 
         # merge windows
         attn_windows = attn_windows.view(-1, self.win_size, self.win_size, C)
