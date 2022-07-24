@@ -58,8 +58,8 @@ class WindowAttention(nn.Module):
         self.softmax = nn.Softmax(dim=-1)
 
     def forward(self, x, attn_kv=None, mask=None):
+        print("[attn] x.shape: ",x.shape)
         B_, N, C = x.shape
-        # print("[attn] x.shape: ",x.shape)
         q, k, v = self.qkv(x,attn_kv)
         q = q * self.scale
         attn = (q @ k.transpose(-2, -1))

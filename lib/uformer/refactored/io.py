@@ -43,12 +43,13 @@ def load_model_original(*args,**kwargs):
     qkv_bias = optional(kwargs,'qkv_bias',True)
     token_projection = optional(kwargs,'token_projection','linear')
     token_mlp = optional(kwargs,'token_mlp','leff')
+    stride = optional(kwargs,'stride',None)
 
     # -- init model --
     model = Uformer(img_size=input_size, in_chans=nchnls, embed_dim=embed_dim,
                     depths=depths, win_size=win_size, mlp_ratio=mlp_ratio,
                     qkv_bias=qkv_bias, token_projection=token_projection,
-                    token_mlp=token_mlp,refactored=False)
+                    token_mlp=token_mlp,refactored=False,stride=stride)
     model = model.to(device)
 
     # -- load weights --
@@ -86,12 +87,13 @@ def load_model_refactored(*args,**kwargs):
     qkv_bias = optional(kwargs,'qkv_bias',True)
     token_projection = optional(kwargs,'token_projection','linear')
     token_mlp = optional(kwargs,'token_mlp','leff')
+    stride = optional(kwargs,'stride',None)
 
     # -- init model --
     model = Uformer(img_size=input_size, in_chans=nchnls, embed_dim=embed_dim,
                     depths=depths, win_size=win_size, mlp_ratio=mlp_ratio,
                     qkv_bias=qkv_bias, token_projection=token_projection,
-                    token_mlp=token_mlp,refactored=True)
+                    token_mlp=token_mlp,refactored=True,stride=stride)
     model = model.to(device)
 
     # -- load weights --

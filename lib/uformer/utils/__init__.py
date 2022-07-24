@@ -6,3 +6,4 @@ from . import model_utils
 from . import io
 from . import timer
 from . import gpu_mem
+from . import misc

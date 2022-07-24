@@ -337,7 +337,7 @@ class WindowAttention(nn.Module):
             self.qkv = LinearProjection_Concat_kv(dim,num_heads,dim//num_heads,bias=qkv_bias)
         else:
             self.qkv = LinearProjection(dim,num_heads,dim//num_heads,bias=qkv_bias)
-        
+
         self.token_projection = token_projection
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
@@ -349,16 +349,22 @@ class WindowAttention(nn.Module):
 
     def forward(self, x, attn_kv=None, mask=None):
         B_, N, C = x.shape
+        # print("[wattn] x.shape: ",x.shape)
         q, k, v = self.qkv(x,attn_kv)
+        # print("[wattn] q.shape, k.shape, v.shape: ",q.shape,k.shape,v.shape)
         q = q * self.scale
+        # print("[wattn] q.shape: ",q.shape)
         attn = (q @ k.transpose(-2, -1))
+        # print("[wattn] attn.shape: ",attn.shape,self.num_heads)
 
         relative_position_bias = self.relative_position_bias_table[self.relative_position_index.view(-1)].view(
             self.win_size[0] * self.win_size[1], self.win_size[0] * self.win_size[1], -1)  # Wh*Ww,Wh*Ww,nH
         relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()  # nH, Wh*Ww, Wh*Ww
         ratio = attn.size(-1)//relative_position_bias.size(-1)
+        # print("relative_position_bias.shape: ",relative_position_bias.shape)
         relative_position_bias = repeat(relative_position_bias, 'nH l c -> nH l (c d)', d = ratio)
-        
+
+        print("attn.shape: ",attn.shape)
         attn = attn + relative_position_bias.unsqueeze(0)
 
         if mask is not None:
@@ -371,8 +377,11 @@ class WindowAttention(nn.Module):
             attn = self.softmax(attn)
 
         attn = self.attn_drop(attn)
+        # print("[wattn] attn.shape: ",attn.shape)
+        # print("[wattn] v.shape: ",v.shape)
 
-        x = (attn @ v).transpose(1, 2).reshape(B_, N, C)
+        x = (attn @ v)
+        x = x.transpose(1, 2).reshape(B_, N, C)
         x = self.proj(x)
         x = self.se_layer(x)
         x = self.proj_drop(x)
@@ -704,6 +713,7 @@ class LeWinTransformerBlock(nn.Module):
             shifted_x = torch.roll(x, shifts=(-self.shift_size, -self.shift_size), dims=(1, 2))
         else:
             shifted_x = x
+        # print("shifted_x.shape: ",shifted_x.shape)
 
         # partition windows
         x_windows = window_partition(shifted_x, self.win_size)  # nW*B, win_size, win_size, C  N*C->C
@@ -726,6 +736,7 @@ class LeWinTransformerBlock(nn.Module):
         # FFN
         x = shortcut + self.drop_path(x)
         x = x + self.drop_path(self.mlp(self.norm2(x)))
+        # print("x.shape: ",x.shape)
         del attn_mask
         return x
 
@@ -1334,13 +1345,18 @@ class Uformer(nn.Module):
         y = self.input_proj(x)
         y = self.pos_drop(y)
         #Encoder
+        # print("y.shape: ",y.shape)
         conv0 = self.encoderlayer_0(y,mask=mask)
+        # print("conv0.shape: ",conv0.shape)
         pool0 = self.dowsample_0(conv0)
         conv1 = self.encoderlayer_1(pool0,mask=mask)
         pool1 = self.dowsample_1(conv1)
         conv2 = self.encoderlayer_2(pool1,mask=mask)
+        # print("conv2.shape: ",conv2.shape)
         pool2 = self.dowsample_2(conv2)
+        # print("pool2.shape: ",pool2.shape)
         conv3 = self.encoderlayer_3(pool2,mask=mask)
+        # print("conv3.shape: ",conv3.shape)
         pool3 = self.dowsample_3(conv3)
 
         # Bottleneck
@@ -1350,7 +1366,7 @@ class Uformer(nn.Module):
         up0 = self.upsample_0(conv4)
         deconv0 = torch.cat([up0,conv3],-1)
         deconv0 = self.decoderlayer_0(deconv0,mask=mask)
-        
+
         up1 = self.upsample_1(deconv0)
         deconv1 = torch.cat([up1,conv2],-1)
         deconv1 = self.decoderlayer_1(deconv1,mask=mask)

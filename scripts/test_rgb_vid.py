@@ -30,6 +30,7 @@ import cache_io
 
 # -- network --
 import uformer
+from uformer.utils.misc import optional,rslice_pair
 
 def run_exp(cfg):
 
@@ -57,8 +58,16 @@ def run_exp(cfg):
 
     # -- data --
     data,loaders = data_hub.sets.load(cfg)
-    groups = data.val.groups
-    indices = [i for i,g in enumerate(groups) if cfg.vid_name == g]
+    groups = data.te.groups
+    indices = [i for i,g in enumerate(groups) if cfg.vid_name in g]
+
+    # -- optional filter --
+    frame_start = optional(cfg,"frame_start",0)
+    frame_end = optional(cfg,"frame_end",0)
+    if frame_start >= 0 and frame_end > 0:
+        def fbnds(fnums,lb,ub): return (lb <= np.min(fnums)) and (ub >= np.max(fnums))
+        indices = [i for i in indices if fbnds(data.te.paths['fnums'][groups[i]],
+                                               cfg.frame_start,cfg.frame_end)]
 
     # -- each subsequence with video name --
     for index in indices:
@@ -70,9 +79,10 @@ def run_exp(cfg):
         sample = data.val[index]
         noisy,clean = sample['noisy'],sample['clean']
         noisy,clean = noisy.to(cfg.device),clean.to(cfg.device)
-        vid_frames = sample['fnums']
+        vid_frames,region = sample['fnums'],sample['region']
         fstart = min(vid_frames)
-        # print("[%d] noisy.shape: " % index,noisy.shape)
+        noisy,clean = rslice_pair(noisy,clean,region)
+        print("[%d] noisy.shape: " % index,noisy.shape)
 
         # -- create timer --
         timer = uformer.utils.timer.ExpTimer()
@@ -119,7 +129,7 @@ def run_exp(cfg):
         timer.stop("deno")
 
         # -- save example --
-        out_dir = Path(cfg.saved_dir) / cfg.vid_name
+        out_dir = Path(cfg.saved_dir) / cfg.dname / cfg.vid_name
         print(out_dir,deno.min(),deno.max())
         deno_fns = uformer.utils.io.save_burst(deno,out_dir,"deno",
                                                fstart=fstart,div=1.,fmt="np")
@@ -216,7 +226,7 @@ def default_cfg():
     cfg.frame_start = 0
     cfg.frame_end = 1000
     # cfg.saved_dir = "./output/saved_results/sidd_rgb"
-    cfg.saved_dir = "./output/saved_results/sidd_bench"
+    cfg.saved_dir = "./output/saved_results/"
     cfg.num_workers = 1
     cfg.device = "cuda:0"
     cfg.sigma = 50. # use large sigma to approx real noise for optical flow
@@ -231,15 +241,17 @@ def main():
 
     # -- get cache --
     cache_dir = ".cache_io"
-    # cache_name = "test_rgb_net"
-    cache_name = "sidd_rgb_bench"
+    cache_name = "test_rgb_net"
+    # cache_name = "sidd_rgb_bench"
     cache = cache_io.ExpCache(cache_dir,cache_name)
-    # cache.clear()
+    cache.clear()
 
     # -- get mesh --
     # dnames = ["sidd_rgb"]
-    dnames = ["sidd_rgb_bench"]
-    vid_names = ["%02d" % x for x in np.arange(0,40)]
+    # dnames = ["sidd_rgb_bench"]
+    # vid_names = ["%02d" % x for x in np.arange(0,40)]
+    dnames = ["set8"]
+    vid_names = ["park_joy"]
     internal_adapt_nsteps = [300]
     internal_adapt_nepochs = [0]
     flow = ["false"]
@@ -255,6 +267,10 @@ def main():
 
     # -- group with default --
     cfg = default_cfg()
+    cfg.nframes = 4
+    cfg.frame_start = 0
+    cfg.frame_end = cfg.nframes-1
+    cfg.isize = "256_256"
     cache_io.append_configs(exps,cfg) # merge the two
 
     # -- run exps --
@@ -279,7 +295,8 @@ def main():
 
     # -- load results --
     records = cache.load_flat_records(exps)
-    prepare_sidd(records)
+    print(records)
+    # prepare_sidd(records)
     exit(0)
     print(records)
     print(records.filter(like="timer"))
