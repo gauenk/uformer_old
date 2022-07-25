@@ -117,7 +117,8 @@ class LeWinTransformerBlockRefactored(nn.Module):
             self.attn = WindowAttention(
                 dim, win_size=to_2tuple(self.win_size), num_heads=num_heads,
                 qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop,
-                proj_drop=drop,token_projection=token_projection,se_layer=se_layer)
+                proj_drop=drop,token_projection=token_projection,se_layer=se_layer,
+                stride=stride,ws=ws,wt=wt,k=k,sb=sb)
         else:
             raise ValueError(f"Uknown fwd_mode [{fwd_mode}]")
 
@@ -231,27 +232,27 @@ class LeWinTransformerBlockRefactored(nn.Module):
         # attn_windows = attn_windows.view(-1, self.win_size, self.win_size, C)
         # shifted_x = window_reverse(attn_windows, self.win_size, H, W,
         #                            stride=stride, region=region)  # B H' W' C
-        return shifted_x
+        return attn_windows
 
     def _window_region_original(self,shifted_x,attn_mask,stride,region,H,W,C):
 
         # partition windows
-        x_windows = window_partition(shifted_x, self.win_size,
-                                     stride=stride, region=region)  # nW*B, win_size, win_size, C  N*C->C
-        x_windows = x_windows.view(-1, self.win_size * self.win_size, C)  # nW*B, win_size*win_size, C
+        # x_windows = window_partition(shifted_x, self.win_size,
+        #                              stride=stride, region=region)  # nW*B, win_size, win_size, C  N*C->C
+        # x_windows = x_windows.view(-1, self.win_size * self.win_size, C)  # nW*B, win_size*win_size, C
         # print("x_windows.shape: ",x_windows.shape)
 
         # W-MSA/SW-MSA
         # print("pre-attn.")
-        attn_windows = self.attn(x_windows, mask=attn_mask)  # nW*B, win_size*win_size, C
+        attn_windows = self.attn(shifted_x, mask=attn_mask)  # nW*B, win_size*win_size, C
         # print("attn_windows.shape: ",attn_windows.shape)
         # print("post-attn.")
 
         # merge windows
-        attn_windows = attn_windows.view(-1, self.win_size, self.win_size, C)
-        shifted_x = window_reverse(attn_windows, self.win_size, H, W,
-                                   stride=stride, region=region)  # B H' W' C
-        return shifted_x
+        # attn_windows = attn_windows.view(-1, self.win_size, self.win_size, C)
+        # shifted_x = window_reverse(attn_windows, self.win_size, H, W,
+        #                            stride=stride, region=region)  # B H' W' C
+        return attn_windows
 
     def flops(self):
         flops = 0

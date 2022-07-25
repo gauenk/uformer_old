@@ -5,13 +5,14 @@ import torch.nn as nn
 from timm.models.layers import trunc_normal_
 
 # -- local imports --
-from .embedding_modules import LinearProjection,ConvProjection,LinearProjection_Concat_kv
+from .embedding_modules import LinearProjection,ConvProjection
+from .embedding_modules import LinearProjection_Concat_kv
 from .misc_modules import SELayer
 
 # -- imports --
 import dnls
-from uformer.utils.misc import assert_nonan,optional,tuple_as_int
 from einops import rearrange,repeat
+from uformer.utils.misc import assert_nonan,optional,tuple_as_int
 
 
 ########### window-based self-attention #############
@@ -179,26 +180,41 @@ class WindowAttentionAugmented(nn.Module):
 
         return q,k,v
 
-    def _modify_attn(self,attn,rel_pos,mask,qinds):
+    def _index_rel_pos(self,rel_pos,qindex,nbatch,nframes):
+        if rel_pos is None: return None
+        rel_pos_inds = th.arange(qindex,qindex+nbatch) % nframes
+        print("rel_pos_inds.shape: ",rel_pos_inds.shape)
+        rel_pos_i = rel_pos[rel_pos_inds]
+        print("rel_pos_i.shape: ",rel_pos_i.shape)
+        return rel_pos_i
+
+    def _index_mask(self,mask,qindex,nbatch,nframes):
+        if mask is None: return None
+        mask_inds = th.arange(qindex,qindex+nbatch) % nframes
+        print("mask_inds.shape: ",mask_inds.shape)
+        mask_i = mask[mask_inds]
+        print("mask_i.shape: ",mask_i.shape)
+        return mask_i
+
+    def _modify_attn(self,attn,rel_pos_i,mask_i):
         # attn.shape = (PS * PS)**2?, nW
 
         # -- add offset --
-        rel_pos = rearrange(rel_pos,'nH l c -> nH (l c)')
-        ratio = attn.size(0)//rel_pos.size(-1)
-        rel_pos = repeat(rel_pos,'nH lc -> (lc d) nH', d = ratio)
-        attn = attn + rel_pos
+        # print("rel_pos.shape: ",rel_pos.shape)
+        # rel_pos = rearrange(rel_pos,'nH l c -> nH (l c)')
+        # print("rel_pos.shape: ",rel_pos.shape)
+        # ratio = attn.size(0)//rel_pos.size(-1)
+        # rel_pos = repeat(rel_pos,'nH lc -> (lc d) nH', d = ratio)
+        # print("rel_pos.shape: ",rel_pos.shape)
+        attn = attn + rel_pos_i
+        assert ratio == 1, "What is the ratio?"
 
+        # -- add mask --
         print("attn.shape: ",attn.shape)
-        if mask is not None:
-            print("mask.shape: ",mask.shape)
-            nW = mask.shape[0]
-            mask = repeat(mask,'nW m n -> nW m (n d)',d = ratio)
-            attn = attn.view(B_ // nW, nW, self.num_heads, N, N*ratio)
-            attn += mask.unsqueeze(1).unsqueeze(0)
-            attn = attn.view(-1, self.num_heads, N, N*ratio)
-            attn = self.softmax(attn)
-        else:
-            attn = self.softmax(attn)
+        print("mask_i.shape: ",mask_i.shape)
+        if mask_i is not None:
+            atnn += mask_i
+        attn = self.softmax(attn)
 
         # attn = self.attn_drop(attn)
         return attn
@@ -290,6 +306,8 @@ class WindowAttentionAugmented(nn.Module):
         min_nbatch,max_nbatch = 4096,1024*32
         nbatch = max(nbatch,min_nbatch) # at least "min_batch"
         nbatch = min(nbatch,max_nbatch) # at most "max_batch"
+        nbatch = min(nbatch,ntotal) # at most "ntotal"
+        nbatch = ntotal
         nbatches = (ntotal-1) // nbatch + 1
 
         # -- iter over batches --
@@ -302,20 +320,53 @@ class WindowAttentionAugmented(nn.Module):
             # -- get patches --
             iqueries = dnls.utils.inds.get_iquery_batch(qindex,nbatch_i,stride,
                                                         region,t,device=device)
-            # -- get attention map --
-            attn,inds = xsearch(q_vid,iqueries,k_vid)
-            attn = self._modify_attn(attn,rel_pos,mask,iqueries)
+            # -- index mask --
+            mask_i = mask#self._index_mask(mask,qindex,nbatch_i,t)
 
-            # -- compute product --
-            x = wpsum(v_vid,attn,inds)
-            x = rearrange(x,'b c ph pw -> b (ph pw) c')
+            # -- index relative position offset --
+            rel_pos_i = rel_pos#self._index_rel_pos(rel_pos,qindex,nbatch_i,t)
+
+            # -- process each head separately --
+            print("\n"*5)
+            print("-"*30)
+            print(q_vid.shape,self.dim,self.num_heads)
+            print("-"*30)
+            print("\n"*5)
+            x,nchnls = [],self.dim//self.num_heads
+            for head in range(self.num_heads):
+
+                # -- access channels for head --
+                chnls = slice(head * nchnls, (head+1) * nchnls)
+                q_vid_head = q_vid[:,chnls].contiguous()
+                k_vid_head = k_vid[:,chnls].contiguous()
+                v_vid_head = v_vid[:,chnls].contiguous()
+                th.cuda.synchronize()
+
+                # -- get attention map --
+                print(q_vid_head.shape)
+                # print(k_vid_head.shape)
+                attn,inds = xsearch(q_vid_head,iqueries,k_vid_head)
+                print("attn.shape: ",attn.shape)
+
+                # -- modified --
+                # attn = self._modify_attn(attn,rel_pos_i,mask_i)
+
+                # -- compute product --
+                x_i = wpsum(v_vid_head,attn,inds)
+                x_i = rearrange(x_i,'b c ph pw -> b (ph pw) c')
+
+                # -- append --
+                print("x_i.shape: ",x_i.shape)
+                x.append(x_i)
+
+            # -- reshape for fold --
+            x = th.cat(x,-1)
+            print("x.shape: ",x.shape)
 
             # -- final xform --
             x = self.proj(x)
             x = self.se_layer(x)
             x = self.proj_drop(x)
-
-            # -- reshape for fold --
             x = rearrange(x,'b (ph pw) c -> b 1 1 c ph pw ',ph=ps,pw=ps)
             x = x.contiguous()
             ones = th.ones_like(x)

@@ -52,7 +52,18 @@ def run_exp(cfg):
     results.timer_deno = []
 
     # -- network --
-    model = uformer.original.load_model().to(cfg.device)
+    if cfg.model_type == "original":
+        model = uformer.original.load_model().to(cfg.device)
+    elif cfg.model_type == "aug_original":
+        fwd_mode = "original"
+        model = uformer.augmented.load_model(cfg.sigma,fwd_mode=fwd_mode,
+                                             stride=cfg.stride)
+    elif cfg.model_type == "aug_dnls_k":
+        fwd_mode = "dnls_k"
+        model = uformer.augmented.load_model(cfg.sigma,fwd_mode=fwd_mode,
+                                             stride=cfg.stride)
+    else:
+        raise ValueError(f"Uknown model_type [{model_type}]")
     model.eval()
     imax = 255.
 
@@ -258,11 +269,13 @@ def main():
     ws,wt = [7],[10]
     mtypes = ["rand"]
     isizes = ["none"]
+    stride = [8,4,2]
+    model_type = ["aug_original"]
     exp_lists = {"dname":dnames,"vid_name":vid_names,
                  "internal_adapt_nsteps":internal_adapt_nsteps,
                  "internal_adapt_nepochs":internal_adapt_nepochs,
-                 "flow":flow,"ws":ws,"wt":wt,
-                 "adapt_mtype":mtypes,"isize":isizes}
+                 "flow":flow,"ws":ws,"wt":wt,"model_type":model_type,
+                 "adapt_mtype":mtypes,"isize":isizes,"stride":stride}
     exps = cache_io.mesh_pydicts(exp_lists) # create mesh
 
     # -- group with default --

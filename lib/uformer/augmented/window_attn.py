@@ -9,12 +9,18 @@ from einops import repeat
 from .embedding_modules import LinearProjection,ConvProjection,LinearProjection_Concat_kv
 from .misc_modules import SELayer
 
+# -- project imports --
+import dnls
+from einops import rearrange,repeat
+from uformer.utils.misc import assert_nonan,optional,tuple_as_int
+
 
 ########### window-based self-attention #############
 class WindowAttention(nn.Module):
     def __init__(self, dim, win_size,num_heads, token_projection='linear',
                  qkv_bias=True, qk_scale=None, attn_drop=0.,
-                 proj_drop=0.,se_layer=False):
+                 proj_drop=0.,se_layer=False,
+                 stride=None,ws=-1,wt=0,k=-1,sb=None,exact=False):
 
         super().__init__()
         self.dim = dim
@@ -22,6 +28,15 @@ class WindowAttention(nn.Module):
         self.num_heads = num_heads
         head_dim = dim // num_heads
         self.scale = qk_scale or head_dim ** -0.5
+
+        # -- set relevant params --
+        self.ps = tuple_as_int(win_size)
+        self.stride = tuple_as_int(stride)
+        self.ws = ws
+        self.wt = wt
+        self.k = k
+        self.sb = sb
+        self.exact = exact
 
         # define a parameter table of relative position bias
         self.relative_position_bias_table = nn.Parameter(
@@ -57,47 +72,163 @@ class WindowAttention(nn.Module):
         trunc_normal_(self.relative_position_bias_table, std=.02)
         self.softmax = nn.Softmax(dim=-1)
 
-    def forward(self, x, attn_kv=None, mask=None):
-        print("[attn] x.shape: ",x.shape)
-        B_, N, C = x.shape
-        q, k, v = self.qkv(x,attn_kv)
-        q = q * self.scale
-        attn = (q @ k.transpose(-2, -1))
-        # print("[attn] x.shape: ",x.shape)
-        # print("(q,k,v).shape: ",q.shape,k.shape,v.shape)
-        # print("attn.shape: ",attn.shape)
 
+    def _index_mask(self,mask,qindex,nbatch,ntotal_t,nframes):
+        if mask is None: return None
+        mask_inds = th.arange(qindex,qindex+nbatch) % ntotal_t
+        # print(mask_inds.min(),mask_inds.max())
+        mask_i = mask[mask_inds].unsqueeze(1)
+        return mask_i
+
+    def _modify_attn(self,attn,rel_pos,mask_i):
+        # attn.shape = (PS * PS)**2?, nW
+
+        # -- add offset --
+        attn = attn + rel_pos.unsqueeze(0)
+        # assert ratio == 1, "What is the ratio?"
+
+        # -- add mask --
+        if mask_i is not None:
+            attn += mask_i
+        attn = self.softmax(attn)
+        attn = self.attn_drop(attn)
+        return attn
+
+    def get_rel_pos(self):
         relative_position_bias = self.relative_position_bias_table[
             self.relative_position_index.view(-1)].view(
                 self.win_size[0] * self.win_size[1],
                 self.win_size[0] * self.win_size[1], -1)  # Wh*Ww,Wh*Ww,nH
+        # print(relative_position_bias.shape)
         relative_position_bias = relative_position_bias.permute(
             2, 0, 1).contiguous()  # nH, Wh*Ww, Wh*Ww
-        ratio = attn.size(-1)//relative_position_bias.size(-1)
-        relative_position_bias = repeat(relative_position_bias,
-                                        'nH l c -> nH l (c d)', d = ratio)
-        attn = attn + relative_position_bias.unsqueeze(0)
+        # ratio = attn.size(-1)//relative_position_bias.size(-1)
+        # relative_position_bias = repeat(relative_position_bias,
+        #                                 'nH l c -> nH l (c d)', d = ratio)
+        return relative_position_bias
 
-        if mask is not None:
-            nW = mask.shape[0]
-            mask = repeat(mask, 'nW m n -> nW m (n d)',d = ratio)
-            attn = attn.view(B_ // nW, nW, self.num_heads, N, N*ratio) + mask.unsqueeze(1).unsqueeze(0)
-            attn = attn.view(-1, self.num_heads, N, N*ratio)
-            attn = self.softmax(attn)
+    def get_flows(self,flows,vshape):
+        fflow = optional(flows,'fflow',None)
+        bflow = optional(flows,'bflow',None)
+        fflow,bflow = None,None
+        return fflow,bflow
+
+    def forward(self, vid, attn_kv=None, mask=None):
+        # -- init params --
+        t,h,w,c = vid.shape
+        vshape = (t,c,h,w)
+        region = None
+        region = [0,t,0,0,h,w] if region is None else region
+        stride,sb = self.stride,self.sb
+        device,ps = vid.device,self.ps
+        coords = region[2:]
+
+        # -- params --
+        adj,dil = ps//2,1
+        use_reflect = True
+        only_full = True
+        device = vid.device
+        t,h,w,c = vid.shape
+        vshape = (t,c,h,w)
+        stride = self.stride
+        border = "zero" if use_reflect else "reflect"
+        region = [0,t,0,0,h,w] if region is None else region
+        coords = region[2:]
+        ps,sb = self.ps,self.sb
+
+        # -- declarations --
+        unfold = dnls.iunfold.iUnfold(ps,coords,stride=stride,dilation=dil,
+                                      adj=adj,only_full=only_full,border=border)
+        fold = dnls.ifold.iFold(vshape,coords,stride=stride,dilation=dil,
+                                adj=adj,only_full=only_full,
+                                use_reflect=use_reflect,device=device)
+        wfold = dnls.ifold.iFold(vshape,coords,stride=stride,dilation=dil,
+                                 adj=adj,only_full=only_full,use_reflect=use_reflect,
+                                 device=device)
+
+        # -- batching info --
+        npix = h*w
+        coords = region[2:]
+        cr_h = coords[2] - coords[0]
+        cr_w = coords[3] - coords[1]
+        if only_full:
+            nh = (cr_h-dil*(ps-1)-1)//stride+1
+            nw = (cr_w-dil*(ps-1)-1)//stride+1
         else:
-            attn = self.softmax(attn)
+            nh = (cr_h-1)//stride+1
+            nw = (cr_w-1)//stride+1
+        ntotal_t = nh * nw
+        ntotal = t * nh * nw
+        div = 2 if npix >= (540 * 960) else 1
+        if sb is None: nbatch = ntotal//(t*div)
+        else: nbatch = sb
+        min_nbatch,max_nbatch = 4096,1024*32
+        nbatch = max(nbatch,min_nbatch) # at least "min_batch"
+        nbatch = min(nbatch,max_nbatch) # at most "max_batch"
+        nbatch = min(nbatch,ntotal) # actualy min is "ntotal"
+        nbatches = (ntotal-1) // nbatch + 1
 
-        attn = self.attn_drop(attn)
+        # -- prepare input vid --
+        vid = rearrange(vid,'t h w c -> t c h w').contiguous()
 
-        # print("[attn,v].shape: ",attn.shape,v.shape)
-        # tmp = attn @ v
-        # print("tmp.shape: ",tmp.shape)
-        x = (attn @ v).transpose(1, 2).reshape(B_, N, C)
-        # print("[post-attn] x.shape: ",x.shape)
-        x = self.proj(x)
-        x = self.se_layer(x)
-        x = self.proj_drop(x)
-        return x
+        # -- misc offsets --
+        rel_pos = self.get_rel_pos()
+
+        # -- for each batch --
+        for batch in range(nbatches):
+
+            # -- batch info --
+            qindex = min(nbatch * batch,ntotal)
+            nbatch_i =  min(nbatch, ntotal - qindex)
+
+            # -- get patches --
+            iqueries = dnls.utils.inds.get_iquery_batch(qindex,nbatch_i,stride,
+                                                        region,t,device=device)
+
+            # -- select attention mask --
+            attn_kv_i = attn_kv
+            if not(attn_kv is None):
+                print("[aug.wattn] attn_kv_i.shape: ",attn_kv_i.shape)
+                exit(0)
+
+            # -- unfold --
+            patches = unfold(vid,qindex,nbatch_i) # n k pt c ph pw
+            patches = rearrange(patches,'n 1 1 c ph pw -> n (ph pw) c')
+            B_, N, C = patches.shape
+
+            # -- transform --
+            q, k, v = self.qkv(patches,attn_kv_i)
+            q = q * self.scale
+
+            # -- compute attn --
+            attn = (q @ k.transpose(-2, -1))
+            if not(mask is None): print("[aug.wattn] mask.shape: ",mask.shape,ntotal_t)
+            mask_i = self._index_mask(mask,qindex,nbatch_i,ntotal_t,t)
+            attn = self._modify_attn(attn,rel_pos,mask_i)
+
+            # -- compute weighted sum --
+            x = (attn @ v)
+            x = x.transpose(1, 2).reshape(B_, N, C)
+
+            # -- final xforms --
+            x = self.proj(x)
+            x = self.se_layer(x)
+            x = self.proj_drop(x)
+
+            # -- prepare for folding --
+            x = rearrange(x,'n (ph pw) c -> n 1 1 c ph pw',ph=ps,pw=ps)
+            x = x.contiguous()
+            ones = th.ones_like(x)
+
+            # -- folding --
+            fold(x,qindex)
+            wfold(ones,qindex)
+
+        # -- folding weights --
+        vid = fold.vid / (wfold.vid + 1e-10)
+        vid = rearrange(vid,'t c h w -> t h w c')
+
+        return vid
 
     def extra_repr(self) -> str:
         return f'dim={self.dim}, win_size={self.win_size}, num_heads={self.num_heads}'

@@ -363,28 +363,29 @@ class WindowAttention(nn.Module):
         ratio = attn.size(-1)//relative_position_bias.size(-1)
         # print("relative_position_bias.shape: ",relative_position_bias.shape)
         relative_position_bias = repeat(relative_position_bias, 'nH l c -> nH l (c d)', d = ratio)
+        assert ratio == 1
 
-        print("attn.shape: ",attn.shape)
+        # print("attn.shape: ",attn.shape)
         attn = attn + relative_position_bias.unsqueeze(0)
 
         if mask is not None:
             nW = mask.shape[0]
             mask = repeat(mask, 'nW m n -> nW m (n d)',d = ratio)
-            attn = attn.view(B_ // nW, nW, self.num_heads, N, N*ratio) + mask.unsqueeze(1).unsqueeze(0)
+            attn = attn.view(B_ // nW, nW, self.num_heads, N, N*ratio)
+            attn += mask.unsqueeze(1).unsqueeze(0)
             attn = attn.view(-1, self.num_heads, N, N*ratio)
             attn = self.softmax(attn)
         else:
             attn = self.softmax(attn)
 
         attn = self.attn_drop(attn)
-        # print("[wattn] attn.shape: ",attn.shape)
-        # print("[wattn] v.shape: ",v.shape)
 
         x = (attn @ v)
         x = x.transpose(1, 2).reshape(B_, N, C)
         x = self.proj(x)
         x = self.se_layer(x)
         x = self.proj_drop(x)
+
         return x
 
     def extra_repr(self) -> str:
@@ -725,6 +726,7 @@ class LeWinTransformerBlock(nn.Module):
         # merge windows
         attn_windows = attn_windows.view(-1, self.win_size, self.win_size, C)
         shifted_x = window_reverse(attn_windows, self.win_size, H, W)  # B H' W' C
+        # print("[wattn] final_x.shape: ",x.shape)
 
         # reverse cyclic shift
         if self.shift_size > 0:
@@ -867,6 +869,7 @@ class LeWinTransformer_Cross(nn.Module):
         # merge windows
         attn_windows = attn_windows.view(-1, self.win_size, self.win_size, C)
         shifted_x = window_reverse(attn_windows, self.win_size, H, W)  # B H' W' C
+
         # reverse cyclic shift
         if self.shift_size > 0:
             x = torch.roll(shifted_x, shifts=(self.shift_size, self.shift_size), dims=(1, 2))
@@ -994,6 +997,7 @@ class LeWinTransformer_CatCross(nn.Module):
         # merge windows
         attn_windows = attn_windows.view(-1, self.win_size, self.win_size, C)
         shifted_x = window_reverse(attn_windows, self.win_size, H, W)  # B H' W' C
+
         # reverse cyclic shift
         if self.shift_size > 0:
             x = torch.roll(shifted_x, shifts=(self.shift_size, self.shift_size), dims=(1, 2))

@@ -178,8 +178,8 @@ def test_original_augmented(sigma,ref_version):
     # -- refactored exec --
     t,c,h,w = noisy.shape
     region = None#[0,t,0,0,h,w] if ref_version == "ref" else None
-    # fwd_mode = "original"
-    fwd_mode = "dnls_k"
+    fwd_mode = "original"
+    # fwd_mode = "dnls_k"
     ref_model = uformer.augmented.load_model(sigma,fwd_mode=fwd_mode,stride=8)
     with th.no_grad():
         deno_ref = ref_model(noisy,flows=flows,region=region).detach()
@@ -190,7 +190,7 @@ def test_original_augmented(sigma,ref_version):
         print(deno_ref[0,0,:3,:3])
 
     # -- test --
-    error = th.sum((deno_og - deno_ref)**2).item()
+    error = th.mean((deno_og - deno_ref)**2).item()
     if verbose: print("error: ",error)
-    assert error < 1e-15
+    assert error < 1e-13
 
