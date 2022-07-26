@@ -160,12 +160,14 @@ class WindowAttention(nn.Module):
         ntotal_t = nh * nw
         ntotal = t * nh * nw
         div = 2 if npix >= (540 * 960) else 1
-        if sb is None: nbatch = ntotal//(t*div)
+        if sb is None:
+            nbatch = ntotal//(t*div)
+            min_nbatch,max_nbatch = 4096,1024*32
+            nbatch = max(nbatch,min_nbatch) # at least "min_batch"
+            nbatch = min(nbatch,max_nbatch) # at most "max_batch"
         else: nbatch = sb
-        min_nbatch,max_nbatch = 4096,1024*32
-        nbatch = max(nbatch,min_nbatch) # at least "min_batch"
-        nbatch = min(nbatch,max_nbatch) # at most "max_batch"
         nbatch = min(nbatch,ntotal) # actualy min is "ntotal"
+        # print(nbatch,sb)
         nbatches = (ntotal-1) // nbatch + 1
 
         # -- prepare input vid --
@@ -176,6 +178,7 @@ class WindowAttention(nn.Module):
 
         # -- for each batch --
         for batch in range(nbatches):
+            # print("%d/%d" % ((batch+1),nbatches))
 
             # -- batch info --
             qindex = min(nbatch * batch,ntotal)
@@ -202,7 +205,7 @@ class WindowAttention(nn.Module):
 
             # -- compute attn --
             attn = (q @ k.transpose(-2, -1))
-            if not(mask is None): print("[aug.wattn] mask.shape: ",mask.shape,ntotal_t)
+            # if not(mask is None): print("[aug.wattn] mask.shape: ",mask.shape,ntotal_t)
             mask_i = self._index_mask(mask,qindex,nbatch_i,ntotal_t,t)
             attn = self._modify_attn(attn,rel_pos,mask_i)
 

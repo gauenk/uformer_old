@@ -64,12 +64,12 @@ class BasicUformerLayer(nn.Module):
     def extra_repr(self) -> str:
         return f"dim={self.dim}, input_resolution={self.input_resolution}, depth={self.depth}"
 
-    def forward(self, x, flows=None, mask=None, region=None):
+    def forward(self, x, H, W, flows=None, mask=None, region=None):
         for blk in self.blocks:
             if self.use_checkpoint:
-                x = checkpoint.checkpoint(blk, x, flows, region)
+                x = checkpoint.checkpoint(blk, x, H, W, flows, region)
             else:
-                x = blk(x,flows,mask,region)
+                x = blk(x,H,W,flows,mask,region)
         return x
 
     def flops(self):
@@ -135,10 +135,10 @@ class LeWinTransformerBlockRefactored(nn.Module):
         return f"dim={self.dim}, input_resolution={self.input_resolution}, num_heads={self.num_heads}, " \
                f"win_size={self.win_size}, shift_size={self.shift_size}, mlp_ratio={self.mlp_ratio}"
 
-    def forward(self, x, flows=None, mask=None, region=None):
+    def forward(self, x, H, W, flows=None, mask=None, region=None):
         B, L, C = x.shape
-        H = int(math.sqrt(L))
-        W = int(math.sqrt(L))
+        # H = int(math.sqrt(L))
+        # W = int(math.sqrt(L))
 
         ## input mask
         if mask != None:
@@ -200,8 +200,13 @@ class LeWinTransformerBlockRefactored(nn.Module):
 
         # FFN
         x = shortcut + self.drop_path(x)
-        x = x + self.drop_path(self.mlp(self.norm2(x)))
-        del attn_mask
+        x = x + self.drop_path(self.mlp(self.norm2(x),H,W))
+        del attn_mask,shifted_x
+
+        # -- get some space plz --
+        th.cuda.synchronize()
+        th.cuda.empty_cache()
+
         return x
 
     def _window_region(self,shifted_x,attn_mask,stride,flows,region,H,W,C):

@@ -235,49 +235,79 @@ class Uformer(nn.Module):
     def forward(self, x, flows=None, mask=None, region=None):
         # Input Projection
 
+        t,c,H,W = x.shape
         y = self.input_proj(x)
         y = self.pos_drop(y)
-        #Encoder
-        conv0 = self.encoderlayer_0(y,flows=flows,mask=mask,region=region)
+
+        # -- Encoder --
+        h,w = H,W
+        conv0 = self.encoderlayer_0(y,h,w,flows=flows,mask=mask,region=region)
+        if not(self.training): del y
         self.vprint("conv0.shape: ",conv0.shape)
-        pool0 = self.dowsample_0(conv0)
-        conv1 = self.encoderlayer_1(pool0,flows=flows,mask=mask,region=region)
+        pool0 = self.dowsample_0(conv0,h,w)
+        self.vprint("pool0.shape: ",pool0.shape)
+
+        h,w = h//2,w//2
+        conv1 = self.encoderlayer_1(pool0,h,w,flows=flows,mask=mask,region=region)
+        if not(self.training): del pool0
         self.vprint("conv1.shape: ",conv1.shape)
-        pool1 = self.dowsample_1(conv1)
-        conv2 = self.encoderlayer_2(pool1,flows=flows,mask=mask,region=region)
+        pool1 = self.dowsample_1(conv1,h,w)
+
+        h,w = h//2,w//2
+        conv2 = self.encoderlayer_2(pool1,h,w,flows=flows,mask=mask,region=region)
+        if not(self.training): del pool1
         self.vprint("conv2.shape: ",conv2.shape)
-        pool2 = self.dowsample_2(conv2)
-        conv3 = self.encoderlayer_3(pool2,flows=flows,mask=mask,region=region)
+        pool2 = self.dowsample_2(conv2,h,w)
+
+        h,w = h//2,w//2
+        conv3 = self.encoderlayer_3(pool2,h,w,flows=flows,mask=mask,region=region)
+        if not(self.training): del pool2
         self.vprint("conv3.shape: ",conv3.shape)
-        pool3 = self.dowsample_3(conv3)
+        pool3 = self.dowsample_3(conv3,h,w)
 
         # Bottleneck
-        conv4 = self.conv(pool3, flows=flows, mask=mask,region=region)
+        h,w = h//2,w//2
+        conv4 = self.conv(pool3, h, w, flows=flows, mask=mask,region=region)
+        if not(self.training): del pool3
         self.vprint("conv4.shape: ",conv4.shape)
 
         #Decoder
-        up0 = self.upsample_0(conv4)
+        up0 = self.upsample_0(conv4,h,w)
+        h,w = 2*h,2*w
         deconv0 = torch.cat([up0,conv3],-1)
-        deconv0 = self.decoderlayer_0(deconv0,flows=flows,mask=mask,region=region)
+        deconv0 = self.decoderlayer_0(deconv0,h,w,flows=flows,mask=mask,region=region)
         self.vprint("deconv0.shape: ",deconv0.shape)
+        torch.cuda.empty_cache()
 
-        up1 = self.upsample_1(deconv0)
+        up1 = self.upsample_1(deconv0,h,w)
+        if not(self.training): del deconv0,conv3,conv4,up0
+        torch.cuda.empty_cache()
+        h,w = 2*h,2*w
         deconv1 = torch.cat([up1,conv2],-1)
-        deconv1 = self.decoderlayer_1(deconv1,flows=flows,mask=mask,region=region)
+        deconv1 = self.decoderlayer_1(deconv1,h,w,flows=flows,mask=mask,region=region)
         self.vprint("deconv1.shape: ",deconv1.shape)
+        torch.cuda.empty_cache()
 
-        up2 = self.upsample_2(deconv1)
+        up2 = self.upsample_2(deconv1,h,w)
+        if not(self.training): del deconv1,conv2,up1
+        torch.cuda.empty_cache()
+        h,w = 2*h,2*w
         deconv2 = torch.cat([up2,conv1],-1)
-        deconv2 = self.decoderlayer_2(deconv2,flows=flows,mask=mask,region=region)
+        deconv2 = self.decoderlayer_2(deconv2,h,w,flows=flows,mask=mask,region=region)
         self.vprint("deconv2.shape: ",deconv2.shape)
+        torch.cuda.empty_cache()
 
-        up3 = self.upsample_3(deconv2)
+        up3 = self.upsample_3(deconv2,h,w)
+        if not(self.training): del deconv2,conv1,up2
+        torch.cuda.empty_cache()
+        h,w = 2*h,2*w
         deconv3 = torch.cat([up3,conv0],-1)
-        deconv3 = self.decoderlayer_3(deconv3,flows=flows,mask=mask,region=region)
+        deconv3 = self.decoderlayer_3(deconv3,h,w,flows=flows,mask=mask,region=region)
         self.vprint("deconv3.shape: ",deconv3.shape)
+        torch.cuda.empty_cache()
 
         # Output Projection
-        y = self.output_proj(deconv3)
+        y = self.output_proj(deconv3,h,w)
         return x + y
 
     def flops(self):

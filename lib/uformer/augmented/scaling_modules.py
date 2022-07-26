@@ -14,11 +14,11 @@ class Downsample(nn.Module):
         self.in_channel = in_channel
         self.out_channel = out_channel
 
-    def forward(self, x):
+    def forward(self, x, H, W):
         B, L, C = x.shape
         # import pdb;pdb.set_trace()
-        H = int(math.sqrt(L))
-        W = int(math.sqrt(L))
+        # H = int(math.sqrt(L))
+        # W = int(math.sqrt(L))
         x = x.transpose(1, 2).contiguous().view(B, C, H, W)
         out = self.conv(x).flatten(2).transpose(1,2).contiguous()  # B H*W C
         return out
@@ -40,10 +40,8 @@ class Upsample(nn.Module):
         self.in_channel = in_channel
         self.out_channel = out_channel
 
-    def forward(self, x):
+    def forward(self, x, H, W):
         B, L, C = x.shape
-        H = int(math.sqrt(L))
-        W = int(math.sqrt(L))
         x = x.transpose(1, 2).contiguous().view(B, C, H, W)
         out = self.deconv(x).flatten(2).transpose(1,2).contiguous() # B H*W C
         return out

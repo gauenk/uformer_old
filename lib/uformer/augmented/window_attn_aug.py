@@ -210,8 +210,8 @@ class WindowAttentionAugmented(nn.Module):
         assert ratio == 1, "What is the ratio?"
 
         # -- add mask --
-        print("attn.shape: ",attn.shape)
-        print("mask_i.shape: ",mask_i.shape)
+        # print("attn.shape: ",attn.shape)
+        # print("mask_i.shape: ",mask_i.shape)
         if mask_i is not None:
             atnn += mask_i
         attn = self.softmax(attn)
@@ -224,7 +224,7 @@ class WindowAttentionAugmented(nn.Module):
             self.relative_position_index.view(-1)].view(
                 self.win_size[0] * self.win_size[1],
                 self.win_size[0] * self.win_size[1], -1)  # Wh*Ww,Wh*Ww,nH
-        print(relative_position_bias.shape)
+        # print(relative_position_bias.shape)
         relative_position_bias = relative_position_bias.permute(
             2, 0, 1).contiguous()  # nH, Wh*Ww, Wh*Ww
         # ratio = attn.size(-1)//relative_position_bias.size(-1)
@@ -327,11 +327,11 @@ class WindowAttentionAugmented(nn.Module):
             rel_pos_i = rel_pos#self._index_rel_pos(rel_pos,qindex,nbatch_i,t)
 
             # -- process each head separately --
-            print("\n"*5)
-            print("-"*30)
-            print(q_vid.shape,self.dim,self.num_heads)
-            print("-"*30)
-            print("\n"*5)
+            # print("\n"*5)
+            # print("-"*30)
+            # print(q_vid.shape,self.dim,self.num_heads)
+            # print("-"*30)
+            # print("\n"*5)
             x,nchnls = [],self.dim//self.num_heads
             for head in range(self.num_heads):
 

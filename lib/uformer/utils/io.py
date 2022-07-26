@@ -29,7 +29,7 @@ def save_burst(burst,root,name,fstart=0,div=None,fmt="image"):
     return save_fns
 
 def get_ext(fmt):
-    if fmt == "image":
+    if fmt in ["image","png"]:
         ext = "png"
     elif fmt == "np":
         ext = "npy"
@@ -58,7 +58,7 @@ def save_image(image,path,div=None,fmt="image"):
     if image.max() < 100 and no_div:
         image = image*255.
 
-    if fmt == "image":
+    if fmt in ["image","png"]:
         # -- to uint8 --
         image = np.clip(image,0,255).astype(np.uint8)
 

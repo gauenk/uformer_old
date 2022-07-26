@@ -30,7 +30,9 @@ import cache_io
 
 # -- network --
 import uformer
-from uformer.utils.misc import optional,rslice_pair,stacked2full,full2stacked
+from uformer.utils.misc import optional,rslice_pair,assert_nonan
+from uformer.utils.misc import stacked2full,full2blocks
+from uformer.utils.misc import tiles2img,img2tiles
 
 def run_exp(cfg):
 
@@ -54,14 +56,18 @@ def run_exp(cfg):
     # -- network --
     if cfg.model_type == "original":
         model = uformer.original.load_model().to(cfg.device)
+        tile_h,tile_w = 256,256
+        # tile_h,tile_w = 1024,1024
     elif cfg.model_type == "aug_original":
         fwd_mode = "original"
         model = uformer.augmented.load_model(cfg.sigma,fwd_mode=fwd_mode,
                                              stride=cfg.stride,sb=32*1024)
+        tile_h,tile_w = 2048,2048
     elif cfg.model_type == "aug_dnls_k":
         fwd_mode = "dnls_k"
         model = uformer.augmented.load_model(cfg.sigma,fwd_mode=fwd_mode,
                                              stride=cfg.stride)
+        tile_h,tile_w = 2048,2048
     else:
         raise ValueError(f"Uknown model_type [{model_type}]")
     model.eval()
@@ -91,7 +97,7 @@ def run_exp(cfg):
         noisy,clean = sample['noisy'],sample['clean']
         noisy,clean = noisy.to(cfg.device),clean.to(cfg.device)
         vid_frames,region = sample['fnums'],optional(sample,'region',None)
-        blocks = None #data[cfg.dset].blocks
+        blocks = data[cfg.dset].blocks
         # print(blocks.T,blocks.shape)
         # t,l = blocks[:,0].min(),blocks[:,1].min()
         # b,r = blocks[:,1].max()+256,blocks[:,1].max()+256
@@ -101,9 +107,10 @@ def run_exp(cfg):
         # noisy = rearrange(noisy,'1 c (rh h) (rw w) -> (rh rw) c h w',rh=2,rw=2)
         # clean = rearrange(clean,'1 c (rh h) (rw w) -> (rh rw) c h w',rh=2,rw=2)
         print("[%d] noisy.shape: " % index,noisy.shape)
-        # noisy = noisy[:,:,:3024,:3024]
-        # noisy = noisy[:,:,:2048,:2048]
-        # noisy = noisy[:,:,:1024,:1024]
+        t,c,H,W = noisy.shape
+        assert_nonan(noisy)
+        noisy,nh,nw = img2tiles(noisy,tile_h,tile_w)
+        print("noisy.shape: ",noisy.shape)
 
         # -- stacked to full image --
         nstack = noisy.shape[0]
@@ -149,42 +156,46 @@ def run_exp(cfg):
         batch_size = 390*100
         timer.start("deno")
         with th.no_grad():
-            deno = model(noisy/imax)
-            # t = noisy.shape[0]
-            # deno = []
-            # for ti in range(t):
-            #     deno_i = model(noisy[[ti]]/imax)
-            #     deno.append(deno_i)
-            # deno = th.stack(deno)
-            # deno = model(noisy,cfg.sigma,flows=flows,
-            #              ws=cfg.ws,wt=cfg.wt,batch_size=batch_size)
+            t = noisy.shape[0]
+            deno = []
+            for ti in range(t):
+                deno_i = model(noisy[[ti]]/imax)
+                # deno_i = noisy[[ti]]/imax
+                deno.append(deno_i)
+            deno = th.cat(deno)
             deno = th.clamp(deno,0.,1.)*imax
         timer.stop("deno")
 
+        # -- create deno img from tiles --
+        noisy = tiles2img(noisy,nh,nw,H,W)
+        deno = tiles2img(deno,nh,nw,H,W)
+
+        #
         # -- save example --
-        out_dir = Path(cfg.saved_dir) / cfg.dname / cfg.vid_name
+        #
+
+        out_dir = Path(cfg.saved_dir) / cfg.dname / cfg.vid_name / cfg.model_type
+
+        # -- full output image --
+        out_dir_full = out_dir / "full"
+        uformer.utils.io.save_burst(deno,out_dir,"deno",
+                                    fstart=fstart,div=1.,fmt="np")
+        uformer.utils.io.save_burst(deno,out_dir,"deno",
+                                    fstart=fstart,div=1.,fmt="png")
+        # -- output blocks  --
+        deno = full2blocks(deno,blocks)
+        clean = full2blocks(clean,blocks)
+        noisy = full2blocks(noisy,blocks)
+        print("deno.shape: ",deno.shape)
+        out_dir_blocks = out_dir / "blocks"
         deno_fns = uformer.utils.io.save_burst(deno,out_dir,"deno",
                                                fstart=fstart,div=1.,fmt="np")
-        deno_fns = uformer.utils.io.save_burst(deno,out_dir,"deno",
-                                               fstart=fstart,div=1.,fmt="png")
-        # uformer.utils.io.save_burst(clean,out_dir,"clean",
-        #                             fstart=fstart,div=1.,fmt="np")
-        # uformer.utils.io.save_burst(noisy,out_dir,"noisy",
-        #                             fstart=fstart,div=1.,fmt="np")
-
-        # -- stacked to full image --
-        # if not(blocks is None):
-        #     clean = full2stacked(clean,blocks)
-        #     noisy = full2stacked(noisy,blocks)
-        #     deno = full2stacked(deno,blocks)
 
         # -- psnr --
         noisy_psnrs = compute_psnr(clean,noisy,div=imax)
         psnrs = compute_psnr(clean,deno,div=imax)
         noisy_ssims = compute_ssim(clean,noisy,div=imax)
         ssims = compute_ssim(clean,deno,div=imax)
-        print(noisy_psnrs)
-        print(psnrs)
 
         # -- append results --
         results.noisy_psnrs.append(noisy_psnrs)
@@ -211,14 +222,14 @@ def compute_ssim(clean,deno,div=255.):
     ssims = np.array(ssims)
     return ssims
 
-def prepare_sidd(records):
+def prepare_sidd(records,name):
 
     # -- load denoised files --
     deno_all_fns = list(np.stack(records['deno_fns'].to_numpy()))
     denos = []
     for deno_vid_fns in deno_all_fns:
         deno_vid = []
-        for fn_t in deno_vid_fns:
+        for fn_t in deno_vid_fns[0]:
             if "png" in fn_t:
                 frame_t = np.array(Image.open(fn_t))
             else:
@@ -240,15 +251,24 @@ def prepare_sidd(records):
     # print(time_mp)
     # print(denos.shape)
 
+    # -- out dir --
+    out_dir = Path("output/sidd_submit/%s/" % name)
+    if not out_dir.exists():
+        out_dir.mkdir()
+
     # -- filenames --
     fn_og = "output/sidd_submit/SubmitSrgbFromMatlab.mat"
-    fn = "output/sidd_submit/SubmitSrgb.mat"
-    os.remove(fn) # remove old
+    fn = out_dir / "SubmitSrgb.mat"
+    if fn.exists():
+        os.remove(str(fn)) # remove old
+    fn = str(fn)
 
     # -- read --
     data = hdf5storage.loadmat(fn_og)
+    print(data['DenoisedBlocksSrgb'].shape)
     del data['DenoisedBlocksSrgb']
     data['DenoisedBlocksSrgb'] = denos
+    print(data['DenoisedBlocksSrgb'].shape)
     hdf5storage.savemat(fn,data)
 
 def compute_psnr(clean,deno,div=255.):
@@ -282,23 +302,17 @@ def main():
 
     # -- get cache --
     cache_dir = ".cache_io"
-    # cache_name = "test_rgb_net"
-    cache_name = "sidd_rgb_bench"
+    cache_name = "sidd_bench_full"
     cache = cache_io.ExpCache(cache_dir,cache_name)
-    cache.clear()
+    # cache.clear()
 
-    # -- get mesh --
-    # dnames = ["sidd_bench_full"]
-    dnames = ["sidd_rgb"]
-    # dnames = ["sidd_rgb_bench"]
+    # -- select data --
+    dnames = ["sidd_bench_full"]
     dset = ["val"]
     vid_names = ["%02d" % x for x in np.arange(0,40)]
-    vid_names = [vid_names[0]]
+    # vid_names = [vid_names[0]]
 
-    # dnames = ["set8"]
-    # vid_names = ["park_joy"]
-    # dset = ["te"]
-
+    # -- get mesh --
     internal_adapt_nsteps = [300]
     internal_adapt_nepochs = [0]
     flow = ["false"]
@@ -315,6 +329,7 @@ def main():
     exps_a = cache_io.mesh_pydicts(exp_lists) # create mesh
 
     # -- exps version 2 --
+    exp_lists['dnames'] = ["sidd_bench"]
     exp_lists['stride'] = [8]
     exp_lists['model_type'] = ['original']
     exps_b = cache_io.mesh_pydicts(exp_lists) # create mesh
@@ -359,7 +374,8 @@ def main():
             psnrs_m = psnrs.mean()
             print(model_type,stride,psnrs_m,ssims_m)
 
-    # prepare_sidd(records)
+    for model_type,mdf in records.groupby('model_type'):
+        prepare_sidd(mdf,model_type)
     exit(0)
     print(records)
     print(records.filter(like="timer"))
@@ -401,7 +417,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-# 29.768 @ ?
-# 30.047 @ 1297.05/497
-# ...

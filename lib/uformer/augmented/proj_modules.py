@@ -50,10 +50,8 @@ class OutputProj(nn.Module):
         self.in_channel = in_channel
         self.out_channel = out_channel
 
-    def forward(self, x):
+    def forward(self, x, H, W):
         B, L, C = x.shape
-        H = int(math.sqrt(L))
-        W = int(math.sqrt(L))
         x = x.transpose(1, 2).view(B, C, H, W)
         x = self.proj(x)
         if self.norm is not None:

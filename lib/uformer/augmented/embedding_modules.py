@@ -142,23 +142,29 @@ class LeFF(nn.Module):
         self.dim = dim
         self.hidden_dim = hidden_dim
 
-    def forward(self, x):
+    def forward(self, x, h, w):
         # bs x hw x c
         bs, hw, c = x.size()
-        hh = int(math.sqrt(hw))
+        # hh = int(math.sqrt(hw))
 
         x = self.linear1(x)
 
         # spatial restore
-        x = rearrange(x, ' b (h w) (c) -> b c h w ', h = hh, w = hh)
+        x = rearrange(x, ' b (h w) (c) -> b c h w ', h = h, w = w)
         # bs,hidden_dim,32x32
 
+        # print(th.cuda.memory_reserved()/1024**3)
+        # print(th.cuda.memory_allocated()/1024**3)
+        # print("[0] x.shape: ",x.shape)
         x = self.dwconv(x)
+        # print("[1] x.shape: ",x.shape)
 
         # flaten
-        x = rearrange(x, ' b c h w -> b (h w) c', h = hh, w = hh)
+        x = rearrange(x, ' b c h w -> b (h w) c', h = h, w = w)
+        # print("[2] x.shape: ",x.shape)
 
         x = self.linear2(x)
+        # print("[3] x.shape: ",x.shape)
 
         return x
 
