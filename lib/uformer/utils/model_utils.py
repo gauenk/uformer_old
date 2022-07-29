@@ -23,8 +23,9 @@ def save_checkpoint(model_dir, state, session):
 def load_checkpoint(model, weights):
     checkpoint = torch.load(weights)
     try:
-        model.load_state_dict(checkpoint["state_dict"])
-    except:
+        # model.load_state_dict(checkpoint["state_dict"])
+        raise ValueError("")
+    except Exception as e:
         state_dict = checkpoint["state_dict"]
         new_state_dict = OrderedDict()
         for k, v in state_dict.items():

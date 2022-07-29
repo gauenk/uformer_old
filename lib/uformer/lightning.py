@@ -15,6 +15,7 @@ from pathlib import Path
 from easydict import EasyDict as edict
 
 # -- data --
+import dnls
 import data_hub
 
 # -- optical flow --
@@ -53,13 +54,15 @@ class UformerLit(pl.LightningModule):
         args = []
         kwargs = dict(fwd_mode=fwd_mode,stride=stride,
                       noise_version=nversion,ws=ws,wt=wt,k=k)
+        # self.model = uformer.original.load_model(*args,**kwargs)
         self.model = uformer.augmented.load_model(*args,**kwargs)
         self.batch_size = batch_size
         self.flow = flow
         self.isize = isize
         self.gen_loger = logging.getLogger('lightning')
-        self.gen_loger.setLevel("INFO")
+        self.gen_loger.setLevel("NOTSET")
         self.fwd_mode = fwd_mode
+        self.lr = 1e-4
 
     def forward(self,vid):
         if self.fwd_mode == "dnls_k" or self.fwd_mode == "dnls":
@@ -99,7 +102,7 @@ class UformerLit(pl.LightningModule):
         return flows
 
     def configure_optimizers(self):
-        optim = th.optim.Adam(self.parameters(),lr=5e-5)
+        optim = th.optim.Adam(self.parameters(),lr=self.lr)
         StepLR = th.optim.lr_scheduler.StepLR
         scheduler = StepLR(optim, step_size=5, gamma=0.1)
         return [optim], [scheduler]
@@ -126,10 +129,12 @@ class UformerLit(pl.LightningModule):
                  on_epoch=False,batch_size=self.batch_size)
 
         # -- terminal log --
-        val_psnr = np.mean(compute_psnrs(denos,cleans,div=1.)).item()
-        self.gen_loger.info("train_psnr: %2.2f" % val_psnr)
+        psnr = np.mean(compute_psnrs(denos,cleans,div=1.)).item()
+        self.gen_loger.info("train_psnr: %2.2f" % psnr)
         # print("train_psnr: %2.2f" % val_psnr)
         self.log("train_loss", loss.item(), on_step=True,
+                 on_epoch=False, batch_size=self.batch_size)
+        self.log("train_psnr", psnr, on_step=True,
                  on_epoch=False, batch_size=self.batch_size)
 
         return loss
@@ -139,11 +144,6 @@ class UformerLit(pl.LightningModule):
         # -- unpack batch
         noisy = batch['noisy'][i]/255.
         clean = batch['clean'][i]/255.
-        region = batch['region'][i]
-
-        # -- get data --
-        noisy = rslice(noisy,region)
-        clean = rslice(clean,region)
 
         # -- foward --
         deno = self.forward(noisy)

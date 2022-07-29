@@ -18,7 +18,8 @@ class Uformer(nn.Module):
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0.1,
                  norm_layer=nn.LayerNorm, patch_norm=True,
                  use_checkpoint=False, token_projection='linear', token_mlp='ffn',
-                 se_layer=False, dowsample=Downsample, upsample=Upsample,
+                 modulator=False, cross_modulator=False,
+                 dowsample=Downsample, upsample=Upsample,
                  fwd_mode="dnls_k", stride=None, ws=-1, wt=0, k=100, sb=None,
                  **kwargs):
         super().__init__()
@@ -71,7 +72,6 @@ class Uformer(nn.Module):
                             use_checkpoint=use_checkpoint,
                             token_projection=token_projection,
                             token_mlp=token_mlp,
-                            se_layer=se_layer,
                             fwd_mode=fwd_mode,stride=stride,ws=ws,wt=wt,k=k,sb=sb)
         self.dowsample_0 = dowsample(embed_dim, embed_dim*2)
         self.encoderlayer_1 = BasicUformerLayer(dim=embed_dim*2,
@@ -87,7 +87,7 @@ class Uformer(nn.Module):
                             norm_layer=norm_layer,
                             use_checkpoint=use_checkpoint,
                             token_projection=token_projection,
-                            token_mlp=token_mlp,se_layer=se_layer,
+                            token_mlp=token_mlp,
                             fwd_mode=fwd_mode,stride=stride,ws=ws,wt=wt,k=k,sb=sb)
         self.dowsample_1 = dowsample(embed_dim*2, embed_dim*4)
         self.encoderlayer_2 = BasicUformerLayer(dim=embed_dim*4,
@@ -103,7 +103,7 @@ class Uformer(nn.Module):
                             norm_layer=norm_layer,
                             use_checkpoint=use_checkpoint,
                             token_projection=token_projection,
-                            token_mlp=token_mlp,se_layer=se_layer,
+                            token_mlp=token_mlp,
                             fwd_mode=fwd_mode,stride=stride,ws=ws,wt=wt,k=k,sb=sb)
         self.dowsample_2 = dowsample(embed_dim*4, embed_dim*8)
         self.encoderlayer_3 = BasicUformerLayer(dim=embed_dim*8,
@@ -119,7 +119,7 @@ class Uformer(nn.Module):
                             norm_layer=norm_layer,
                             use_checkpoint=use_checkpoint,
                             token_projection=token_projection,
-                            token_mlp=token_mlp,se_layer=se_layer,
+                            token_mlp=token_mlp,
                             fwd_mode=fwd_mode,stride=stride,ws=ws,wt=wt,k=k,sb=sb)
         self.dowsample_3 = dowsample(embed_dim*8, embed_dim*16)
 
@@ -137,7 +137,7 @@ class Uformer(nn.Module):
                             norm_layer=norm_layer,
                             use_checkpoint=use_checkpoint,
                             token_projection=token_projection,
-                            token_mlp=token_mlp,se_layer=se_layer,
+                            token_mlp=token_mlp,
                             fwd_mode=fwd_mode,stride=stride,ws=ws,wt=wt,k=k,sb=sb)
 
         # Decoder
@@ -155,7 +155,8 @@ class Uformer(nn.Module):
                             norm_layer=norm_layer,
                             use_checkpoint=use_checkpoint,
                             token_projection=token_projection,
-                            token_mlp=token_mlp,se_layer=se_layer,
+                            token_mlp=token_mlp,
+                            modulator=modulator,cross_modulator=cross_modulator,
                             fwd_mode=fwd_mode,stride=stride,ws=ws,wt=wt,k=k,sb=sb)
         self.upsample_1 = upsample(embed_dim*16, embed_dim*4)
         self.decoderlayer_1 = BasicUformerLayer(dim=embed_dim*8,
@@ -171,7 +172,8 @@ class Uformer(nn.Module):
                             norm_layer=norm_layer,
                             use_checkpoint=use_checkpoint,
                             token_projection=token_projection,
-                            token_mlp=token_mlp,se_layer=se_layer,
+                            token_mlp=token_mlp,
+                            modulator=modulator,cross_modulator=cross_modulator,
                             fwd_mode=fwd_mode,stride=stride,ws=ws,wt=wt,k=k,sb=sb)
         self.upsample_2 = upsample(embed_dim*8, embed_dim*2)
         self.decoderlayer_2 = BasicUformerLayer(dim=embed_dim*4,
@@ -187,7 +189,8 @@ class Uformer(nn.Module):
                             norm_layer=norm_layer,
                             use_checkpoint=use_checkpoint,
                             token_projection=token_projection,
-                            token_mlp=token_mlp,se_layer=se_layer,
+                            token_mlp=token_mlp,
+                            modulator=modulator,cross_modulator=cross_modulator,
                             fwd_mode=fwd_mode,stride=stride,ws=ws,wt=wt,k=k,sb=sb)
         self.upsample_3 = upsample(embed_dim*4, embed_dim)
         self.decoderlayer_3 = BasicUformerLayer(dim=embed_dim*2,
@@ -203,7 +206,8 @@ class Uformer(nn.Module):
                             norm_layer=norm_layer,
                             use_checkpoint=use_checkpoint,
                             token_projection=token_projection,
-                            token_mlp=token_mlp,se_layer=se_layer,
+                            token_mlp=token_mlp,
+                            modulator=modulator,cross_modulator=cross_modulator,
                             fwd_mode=fwd_mode,stride=stride,ws=ws,wt=wt,k=k,sb=sb)
 
         self.apply(self._init_weights)

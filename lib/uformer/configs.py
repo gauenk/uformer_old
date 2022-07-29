@@ -40,12 +40,13 @@ def default_train_cfg():
     cfg.batch_size_te = 1
     cfg.saved_dir = "./output/saved_results/"
     cfg.device = "cuda:0"
-    cfg.dname = "sidd_rgb_medium"
+    cfg.dname = "sidd_rgb_medium_cropped"
     cfg.nversion = "noise"
     cfg.bw = False
     cfg.nsamples_at_testing = 2
     cfg.nsamples_tr = 0
     cfg.nsamples_val = 2
+    cfg.rand_order_tr = True
     cfg.rand_order_val = False
     cfg.index_skip_val = 5
     cfg.nepochs = 10

@@ -1,8 +1,8 @@
 
+import math,pickle
 import numpy as np
 import torch as th
 from einops import rearrange
-import pickle
 
 def optional(pydict,key,default):
     if pydict is None: return default
@@ -163,4 +163,19 @@ def img2tiles(img,tile_h,tile_w):
             imgs.append(img_i)
     imgs = th.cat(imgs)
     return imgs,nh,nw
+
+def expand2square(timg,factor=16.0):
+    _, _, h, w = timg.size()
+
+    X = int(math.ceil(max(h,w)/float(factor))*factor)
+
+    img = th.zeros(1,3,X,X).type_as(timg) # 3, h,w
+    mask = th.zeros(1,1,X,X).type_as(timg)
+
+    # print(img.size(),mask.size())
+    # print((X - h)//2, (X - h)//2+h, (X - w)//2, (X - w)//2+w)
+    img[:,:, ((X - h)//2):((X - h)//2 + h),((X - w)//2):((X - w)//2 + w)] = timg
+    mask[:,:, ((X - h)//2):((X - h)//2 + h),((X - w)//2):((X - w)//2 + w)].fill_(1)
+
+    return img, mask.bool()
 

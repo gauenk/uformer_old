@@ -19,8 +19,7 @@ from uformer.utils.misc import assert_nonan,optional,tuple_as_int
 class WindowAttentionAugmented(nn.Module):
     def __init__(self, dim, win_size,num_heads, token_projection='linear',
                  qkv_bias=True, qk_scale=None, attn_drop=0.,
-                 proj_drop=0.,se_layer=False,
-                 stride=None,ws=-1,wt=0,k=-1,sb=None,exact=False):
+                 proj_drop=0.,stride=None,ws=-1,wt=0,k=-1,sb=None,exact=False):
 
         super().__init__()
         self.dim = dim
@@ -67,13 +66,13 @@ class WindowAttentionAugmented(nn.Module):
         self.token_projection = token_projection
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
-        self.se_layer = SELayer(dim) if se_layer else nn.Identity()
+        # self.se_layer = SELayer(dim) if se_layer else nn.Identity()
         self.proj_drop = nn.Dropout(proj_drop)
 
         trunc_normal_(self.relative_position_bias_table, std=.02)
         self.softmax = nn.Softmax(dim=0)
 
-    def _qkv_videos(self,x,region,attn_kv):
+    def _qkv_videos(self,x,region,attn_kv,modulator):
 
         # -- params --
         adj,dil = 0,1
@@ -143,6 +142,10 @@ class WindowAttentionAugmented(nn.Module):
             # -- unfold --
             patches = unfold(x,qindex,nbatch_i) # n k pt c ph pw
             patches = rearrange(patches,'n 1 1 c ph pw -> n (ph pw) c')
+
+            # -- optional modulator --
+            if not(modulator is None):
+                patches += modulator.weight
 
             # -- transform --
             q, k, v = self.qkv(patches,attn_kv_i)
@@ -263,7 +266,7 @@ class WindowAttentionAugmented(nn.Module):
                                             adj=adj, exact=exact)
         return wpsum
 
-    def forward(self, x, flows, attn_kv=None, mask=None, region=None):
+    def forward(self, x, flows, modulator, attn_kv=None, mask=None, region=None):
 
         # print("start it.")
         # -- init params --
@@ -289,7 +292,7 @@ class WindowAttentionAugmented(nn.Module):
                                  device=device)
 
         # -- get (q,k,v) videos --
-        q_vid,k_vid,v_vid = self._qkv_videos(x,region,attn_kv)
+        q_vid,k_vid,v_vid = self._qkv_videos(x,region,attn_kv,modulator)
         rel_pos = self.get_rel_pos()
 
         # -- batching info --
@@ -365,7 +368,7 @@ class WindowAttentionAugmented(nn.Module):
 
             # -- final xform --
             x = self.proj(x)
-            x = self.se_layer(x)
+            # x = self.se_layer(x)
             x = self.proj_drop(x)
             x = rearrange(x,'b (ph pw) c -> b 1 1 c ph pw ',ph=ps,pw=ps)
             x = x.contiguous()

@@ -19,8 +19,7 @@ from uformer.utils.misc import assert_nonan,optional,tuple_as_int
 class WindowAttention(nn.Module):
     def __init__(self, dim, win_size,num_heads, token_projection='linear',
                  qkv_bias=True, qk_scale=None, attn_drop=0.,
-                 proj_drop=0.,se_layer=False,
-                 stride=None,ws=-1,wt=0,k=-1,sb=None,exact=False):
+                 proj_drop=0., stride=None,ws=-1,wt=0,k=-1,sb=None,exact=False):
 
         super().__init__()
         self.dim = dim
@@ -66,7 +65,7 @@ class WindowAttention(nn.Module):
         self.token_projection = token_projection
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
-        self.se_layer = SELayer(dim) if se_layer else nn.Identity()
+        # self.se_layer = SELayer(dim) if se_layer else nn.Identity()
         self.proj_drop = nn.Dropout(proj_drop)
 
         trunc_normal_(self.relative_position_bias_table, std=.02)
@@ -113,7 +112,7 @@ class WindowAttention(nn.Module):
         fflow,bflow = None,None
         return fflow,bflow
 
-    def forward(self, vid, attn_kv=None, mask=None):
+    def forward(self, vid, modulator, attn_kv=None, mask=None):
         # -- init params --
         t,h,w,c = vid.shape
         vshape = (t,c,h,w)
@@ -185,8 +184,8 @@ class WindowAttention(nn.Module):
             nbatch_i =  min(nbatch, ntotal - qindex)
 
             # -- get patches --
-            iqueries = dnls.utils.inds.get_iquery_batch(qindex,nbatch_i,stride,
-                                                        region,t,device=device)
+            # iqueries = dnls.utils.inds.get_iquery_batch(qindex,nbatch_i,stride,
+            #                                             region,t,device=device)
 
             # -- select attention mask --
             attn_kv_i = attn_kv
@@ -199,13 +198,17 @@ class WindowAttention(nn.Module):
             patches = rearrange(patches,'n 1 1 c ph pw -> n (ph pw) c')
             B_, N, C = patches.shape
 
+            # -- optional modulator --
+            if not(modulator is None):
+                patches = patches + modulator.weight
+
             # -- transform --
             q, k, v = self.qkv(patches,attn_kv_i)
             q = q * self.scale
 
             # -- compute attn --
             attn = (q @ k.transpose(-2, -1))
-            # if not(mask is None): print("[aug.wattn] mask.shape: ",mask.shape,ntotal_t)
+            # if not(mask is None): print("[aug.wattn] mask.shape:",mask.shape,ntotal_t)
             mask_i = self._index_mask(mask,qindex,nbatch_i,ntotal_t,t)
             attn = self._modify_attn(attn,rel_pos,mask_i)
 
@@ -215,7 +218,7 @@ class WindowAttention(nn.Module):
 
             # -- final xforms --
             x = self.proj(x)
-            x = self.se_layer(x)
+            # x = self.se_layer(x)
             x = self.proj_drop(x)
 
             # -- prepare for folding --

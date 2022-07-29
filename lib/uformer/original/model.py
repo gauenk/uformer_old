@@ -414,6 +414,78 @@ class WindowAttention(nn.Module):
         print("W-MSA:{%.2f}"%(flops/1e9))
         return flops
 
+########### self-attention #############
+class Attention(nn.Module):
+    def __init__(self, dim,num_heads, token_projection='linear', qkv_bias=True, qk_scale=None, attn_drop=0., proj_drop=0.):
+
+        super().__init__()
+        self.dim = dim
+        self.num_heads = num_heads
+        head_dim = dim // num_heads
+        self.scale = qk_scale or head_dim ** -0.5
+
+        self.qkv = LinearProjection(dim,num_heads,dim//num_heads,bias=qkv_bias)
+
+        self.token_projection = token_projection
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj = nn.Linear(dim, dim)
+        self.proj_drop = nn.Dropout(proj_drop)
+
+        self.softmax = nn.Softmax(dim=-1)
+
+    def forward(self, x, attn_kv=None, mask=None):
+        B_, N, C = x.shape
+        q, k, v = self.qkv(x,attn_kv)
+        q = q * self.scale
+        attn = (q @ k.transpose(-2, -1))
+
+        # relative_position_bias = self.relative_position_bias_table[self.relative_position_index.view(-1)].view(
+        #     self.win_size[0] * self.win_size[1], self.win_size[0] * self.win_size[1], -1)  # Wh*Ww,Wh*Ww,nH
+        # relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()  # nH, Wh*Ww, Wh*Ww
+        # ratio = attn.size(-1)//relative_position_bias.size(-1)
+        # relative_position_bias = repeat(relative_position_bias, 'nH l c -> nH l (c d)', d = ratio)
+
+        # attn = attn + relative_position_bias.unsqueeze(0)
+
+        if mask is not None:
+            nW = mask.shape[0]
+            # mask = repeat(mask, 'nW m n -> nW m (n d)',d = ratio)
+            attn = attn.view(B_ // nW, nW, self.num_heads, N, N) + mask.unsqueeze(1).unsqueeze(0)
+            attn = attn.view(-1, self.num_heads, N, N)
+            attn = self.softmax(attn)
+        else:
+            attn = self.softmax(attn)
+
+        attn = self.attn_drop(attn)
+
+        x = (attn @ v).transpose(1, 2).reshape(B_, N, C)
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        return x
+
+    def extra_repr(self) -> str:
+        return f'dim={self.dim}, num_heads={self.num_heads}'
+
+    def flops(self, q_num, kv_num):
+        # calculate flops for 1 window with token length of N
+        # print(N, self.dim)
+        flops = 0
+        # N = self.win_size[0]*self.win_size[1]
+        # nW = H*W/N
+        # qkv = self.qkv(x)
+        # flops += N * self.dim * 3 * self.dim
+        flops += self.qkv.flops(q_num, kv_num)
+        # attn = (q @ k.transpose(-2, -1))
+
+        flops += self.num_heads * q_num * (self.dim // self.num_heads) * kv_num
+        #  x = (attn @ v)
+        flops += self.num_heads * q_num * (self.dim // self.num_heads) * kv_num
+
+        # x = self.proj(x)
+        flops += q_num * self.dim * self.dim
+        print("MCA:{%.2f}"%(flops/1e9))
+        return flops
+
 #########################################
 ########### feed-forward network #############
 class Mlp(nn.Module):
@@ -639,7 +711,7 @@ class OutputProj(nn.Module):
 class LeWinTransformerBlock(nn.Module):
     def __init__(self, dim, input_resolution, num_heads, win_size=8, shift_size=0,
                  mlp_ratio=4., qkv_bias=True, qk_scale=None, drop=0., attn_drop=0., drop_path=0.,
-                 act_layer=nn.GELU, norm_layer=nn.LayerNorm,token_projection='linear',token_mlp='leff',se_layer=False):
+                 act_layer=nn.GELU, norm_layer=nn.LayerNorm,token_projection='linear',token_mlp='leff',modulator=False,cross_modulator=False):
         super().__init__()
         self.dim = dim
         self.input_resolution = input_resolution
@@ -653,17 +725,33 @@ class LeWinTransformerBlock(nn.Module):
             self.win_size = min(self.input_resolution)
         assert 0 <= self.shift_size < self.win_size, "shift_size must in 0-win_size"
 
+        if modulator:
+            self.modulator = nn.Embedding(win_size*win_size, dim) # modulator
+        else:
+            self.modulator = None
+
+        if cross_modulator:
+            self.cross_modulator = nn.Embedding(win_size*win_size, dim) # cross_modulator
+            self.cross_attn = Attention(dim,num_heads,qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop,
+                    token_projection=token_projection,)
+            self.norm_cross = norm_layer(dim)
+        else:
+            self.cross_modulator = None
+
         self.norm1 = norm_layer(dim)
         self.attn = WindowAttention(
             dim, win_size=to_2tuple(self.win_size), num_heads=num_heads,
             qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop,
-            token_projection=token_projection,se_layer=se_layer)
+            token_projection=token_projection)
 
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim,act_layer=act_layer, drop=drop) if token_mlp=='ffn' else LeFF(dim,mlp_hidden_dim,act_layer=act_layer, drop=drop)
 
+
+    def with_pos_embed(self, tensor, pos):
+        return tensor if pos is None else tensor + pos
 
     def extra_repr(self) -> str:
         return f"dim={self.dim}, input_resolution={self.input_resolution}, num_heads={self.num_heads}, " \
@@ -704,7 +792,13 @@ class LeWinTransformerBlock(nn.Module):
             shift_attn_mask = shift_mask_windows.unsqueeze(1) - shift_mask_windows.unsqueeze(2) # nW, win_size*win_size, win_size*win_size
             shift_attn_mask = shift_attn_mask.masked_fill(shift_attn_mask != 0, float(-100.0)).masked_fill(shift_attn_mask == 0, float(0.0))
             attn_mask = attn_mask + shift_attn_mask if attn_mask is not None else shift_attn_mask
-            
+
+        if self.cross_modulator is not None:
+            shortcut = x
+            x_cross = self.norm_cross(x)
+            x_cross = self.cross_attn(x, self.cross_modulator.weight)
+            x = shortcut + x_cross
+
         shortcut = x
         x = self.norm1(x)
         x = x.view(B, H, W, C)
@@ -720,8 +814,13 @@ class LeWinTransformerBlock(nn.Module):
         x_windows = window_partition(shifted_x, self.win_size)  # nW*B, win_size, win_size, C  N*C->C
         x_windows = x_windows.view(-1, self.win_size * self.win_size, C)  # nW*B, win_size*win_size, C
 
+        if self.modulator is not None:
+            wmsa_in = self.with_pos_embed(x_windows,self.modulator.weight)
+        else:
+            wmsa_in = x_windows
+
         # W-MSA/SW-MSA
-        attn_windows = self.attn(x_windows, mask=attn_mask)  # nW*B, win_size*win_size, C
+        attn_windows = self.attn(wmsa_in, mask=attn_mask)  # nW*B, win_size*win_size, C
 
         # merge windows
         attn_windows = attn_windows.view(-1, self.win_size, self.win_size, C)
@@ -1029,7 +1128,8 @@ class BasicUformerLayer(nn.Module):
     def __init__(self, dim, output_dim, input_resolution, depth, num_heads, win_size,
                  mlp_ratio=4., qkv_bias=True, qk_scale=None, drop=0., attn_drop=0.,
                  drop_path=0., norm_layer=nn.LayerNorm, use_checkpoint=False,
-                 token_projection='linear',token_mlp='ffn',se_layer=False):
+                 token_projection='linear',token_mlp='ffn',
+                 modulator = False, cross_modulator = False):
 
         super().__init__()
         self.dim = dim
@@ -1045,11 +1145,15 @@ class BasicUformerLayer(nn.Module):
                                  qkv_bias=qkv_bias, qk_scale=qk_scale,
                                  drop=drop, attn_drop=attn_drop,
                                  drop_path=drop_path[i] if isinstance(drop_path, list) else drop_path,
-                                 norm_layer=norm_layer,token_projection=token_projection,token_mlp=token_mlp,se_layer=se_layer)
+                                  norm_layer=norm_layer,
+                                  token_projection=token_projection,
+                                  token_mlp=token_mlp,
+                                  modulator=modulator,
+                                  cross_modulator=cross_modulator)
             for i in range(depth)])
 
     def extra_repr(self) -> str:
-        return f"dim={self.dim}, input_resolution={self.input_resolution}, depth={self.depth}"    
+        return f"dim={self.dim}, input_resolution={self.input_resolution}, depth={self.depth}"
 
     def forward(self, x, mask=None):
         for blk in self.blocks:
@@ -1155,7 +1259,8 @@ class Uformer(nn.Module):
                  win_size=8, mlp_ratio=4., qkv_bias=True, qk_scale=None,
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0.1,
                  norm_layer=nn.LayerNorm, patch_norm=True,
-                 use_checkpoint=False, token_projection='linear', token_mlp='ffn', se_layer=False,
+                 use_checkpoint=False, token_projection='linear', token_mlp='ffn',
+                 modulator=False,cross_modulator=False,dd_in=3,
                  dowsample=Downsample, upsample=Upsample, **kwargs):
         super().__init__()
 
@@ -1169,6 +1274,9 @@ class Uformer(nn.Module):
         self.win_size =win_size
         self.reso = img_size
         self.pos_drop = nn.Dropout(p=drop_rate)
+
+        # self.modulator = modulator
+        # self.cross_modulator = cross_modulator
 
         # stochastic depth
         enc_dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths[:self.num_enc_layers]))] 
@@ -1195,7 +1303,7 @@ class Uformer(nn.Module):
                             drop_path=enc_dpr[sum(depths[:0]):sum(depths[:1])],
                             norm_layer=norm_layer,
                             use_checkpoint=use_checkpoint,
-                            token_projection=token_projection,token_mlp=token_mlp,se_layer=se_layer)
+                            token_projection=token_projection,token_mlp=token_mlp)
         self.dowsample_0 = dowsample(embed_dim, embed_dim*2)
         self.encoderlayer_1 = BasicUformerLayer(dim=embed_dim*2,
                             output_dim=embed_dim*2,
@@ -1210,7 +1318,7 @@ class Uformer(nn.Module):
                             drop_path=enc_dpr[sum(depths[:1]):sum(depths[:2])],
                             norm_layer=norm_layer,
                             use_checkpoint=use_checkpoint,
-                            token_projection=token_projection,token_mlp=token_mlp,se_layer=se_layer)
+                            token_projection=token_projection,token_mlp=token_mlp)
         self.dowsample_1 = dowsample(embed_dim*2, embed_dim*4)
         self.encoderlayer_2 = BasicUformerLayer(dim=embed_dim*4,
                             output_dim=embed_dim*4,
@@ -1225,7 +1333,7 @@ class Uformer(nn.Module):
                             drop_path=enc_dpr[sum(depths[:2]):sum(depths[:3])],
                             norm_layer=norm_layer,
                             use_checkpoint=use_checkpoint,
-                            token_projection=token_projection,token_mlp=token_mlp,se_layer=se_layer)
+                            token_projection=token_projection,token_mlp=token_mlp)
         self.dowsample_2 = dowsample(embed_dim*4, embed_dim*8)
         self.encoderlayer_3 = BasicUformerLayer(dim=embed_dim*8,
                             output_dim=embed_dim*8,
@@ -1240,7 +1348,7 @@ class Uformer(nn.Module):
                             drop_path=enc_dpr[sum(depths[:3]):sum(depths[:4])],
                             norm_layer=norm_layer,
                             use_checkpoint=use_checkpoint,
-                            token_projection=token_projection,token_mlp=token_mlp,se_layer=se_layer)
+                            token_projection=token_projection,token_mlp=token_mlp)
         self.dowsample_3 = dowsample(embed_dim*8, embed_dim*16)
 
         # Bottleneck
@@ -1257,7 +1365,8 @@ class Uformer(nn.Module):
                             drop_path=conv_dpr,
                             norm_layer=norm_layer,
                             use_checkpoint=use_checkpoint,
-                            token_projection=token_projection,token_mlp=token_mlp,se_layer=se_layer)
+                            token_projection=token_projection,token_mlp=token_mlp)
+
 
         # Decoder
         self.upsample_0 = upsample(embed_dim*16, embed_dim*8)
@@ -1274,7 +1383,8 @@ class Uformer(nn.Module):
                             drop_path=dec_dpr[:depths[5]],
                             norm_layer=norm_layer,
                             use_checkpoint=use_checkpoint,
-                            token_projection=token_projection,token_mlp=token_mlp,se_layer=se_layer)
+                            token_projection=token_projection,token_mlp=token_mlp,
+                            modulator=modulator,cross_modulator=cross_modulator)
         self.upsample_1 = upsample(embed_dim*16, embed_dim*4)
         self.decoderlayer_1 = BasicUformerLayer(dim=embed_dim*8,
                             output_dim=embed_dim*8,
@@ -1289,7 +1399,8 @@ class Uformer(nn.Module):
                             drop_path=dec_dpr[sum(depths[5:6]):sum(depths[5:7])],
                             norm_layer=norm_layer,
                             use_checkpoint=use_checkpoint,
-                            token_projection=token_projection,token_mlp=token_mlp,se_layer=se_layer)
+                            token_projection=token_projection,token_mlp=token_mlp,
+                            modulator=modulator,cross_modulator=cross_modulator)
         self.upsample_2 = upsample(embed_dim*8, embed_dim*2)
         self.decoderlayer_2 = BasicUformerLayer(dim=embed_dim*4,
                             output_dim=embed_dim*4,
@@ -1304,7 +1415,8 @@ class Uformer(nn.Module):
                             drop_path=dec_dpr[sum(depths[5:7]):sum(depths[5:8])],
                             norm_layer=norm_layer,
                             use_checkpoint=use_checkpoint,
-                            token_projection=token_projection,token_mlp=token_mlp,se_layer=se_layer)
+                            token_projection=token_projection,token_mlp=token_mlp,
+                            modulator=modulator,cross_modulator=cross_modulator)
         self.upsample_3 = upsample(embed_dim*4, embed_dim)
         self.decoderlayer_3 = BasicUformerLayer(dim=embed_dim*2,
                             output_dim=embed_dim*2,
@@ -1319,7 +1431,8 @@ class Uformer(nn.Module):
                             drop_path=dec_dpr[sum(depths[5:8]):sum(depths[5:9])],
                             norm_layer=norm_layer,
                             use_checkpoint=use_checkpoint,
-                            token_projection=token_projection,token_mlp=token_mlp,se_layer=se_layer)
+                            token_projection=token_projection,token_mlp=token_mlp,
+                            modulator=modulator,cross_modulator=cross_modulator)
 
         self.apply(self._init_weights)
 
@@ -1441,7 +1554,7 @@ class Uformer_Cross(nn.Module):
         # Input/Output
         self.input_proj = InputProj(in_channel=in_chans, out_channel=embed_dim, kernel_size=3, stride=1, act_layer=nn.LeakyReLU)
         self.output_proj = OutputProj(in_channel=embed_dim, out_channel=in_chans, kernel_size=3, stride=1)
-        
+
         # Encoder
         self.encoderlayer_0 = BasicUformerLayer(dim=embed_dim,
                             output_dim=embed_dim,

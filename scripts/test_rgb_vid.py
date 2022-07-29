@@ -30,7 +30,8 @@ import cache_io
 
 # -- network --
 import uformer
-from uformer.utils.misc import optional,rslice_pair,stacked2full,full2stacked
+from uformer import lightning
+from uformer.utils.misc import optional,rslice_pair
 
 def run_exp(cfg):
 
@@ -65,6 +66,7 @@ def run_exp(cfg):
     else:
         raise ValueError(f"Uknown model_type [{model_type}]")
     model.eval()
+    load_checkpoint(model,cfg.use_train)
     imax = 255.
 
     # -- data --
@@ -91,25 +93,10 @@ def run_exp(cfg):
         noisy,clean = sample['noisy'],sample['clean']
         noisy,clean = noisy.to(cfg.device),clean.to(cfg.device)
         vid_frames,region = sample['fnums'],optional(sample,'region',None)
-        blocks = None #data[cfg.dset].blocks
-        # print(blocks.T,blocks.shape)
-        # t,l = blocks[:,0].min(),blocks[:,1].min()
-        # b,r = blocks[:,1].max()+256,blocks[:,1].max()+256
         fstart = min(vid_frames)
-        # noisy,clean = rslice_pair(noisy,clean,region)
+        noisy,clean = rslice_pair(noisy,clean,region)
         print("[%d] noisy.shape: " % index,noisy.shape)
-        # noisy = rearrange(noisy,'1 c (rh h) (rw w) -> (rh rw) c h w',rh=2,rw=2)
-        # clean = rearrange(clean,'1 c (rh h) (rw w) -> (rh rw) c h w',rh=2,rw=2)
         print("[%d] noisy.shape: " % index,noisy.shape)
-        # noisy = noisy[:,:,:3024,:3024]
-        # noisy = noisy[:,:,:2048,:2048]
-        # noisy = noisy[:,:,:1024,:1024]
-
-        # -- stacked to full image --
-        nstack = noisy.shape[0]
-        # if cfg.full_img == "true":
-        #     blocks = data[cfg.dset].blocks
-        #     noisy = stacked2full(noisy,blocks)
 
         # -- create timer --
         timer = uformer.utils.timer.ExpTimer()
@@ -149,20 +136,17 @@ def run_exp(cfg):
         batch_size = 390*100
         timer.start("deno")
         with th.no_grad():
-            deno = model(noisy/imax)
-            # t = noisy.shape[0]
-            # deno = []
-            # for ti in range(t):
-            #     deno_i = model(noisy[[ti]]/imax)
-            #     deno.append(deno_i)
-            # deno = th.stack(deno)
-            # deno = model(noisy,cfg.sigma,flows=flows,
-            #              ws=cfg.ws,wt=cfg.wt,batch_size=batch_size)
+            t = noisy.shape[0]
+            deno = []
+            for ti in range(t):
+                deno_t = model(noisy[[ti]]/imax)
+                deno.append(deno_t)
+            deno = th.cat(deno)
             deno = th.clamp(deno,0.,1.)*imax
         timer.stop("deno")
 
         # -- save example --
-        out_dir = Path(cfg.saved_dir) / cfg.dname / cfg.vid_name
+        out_dir = Path(cfg.saved_dir) / cfg.dname / cfg.model_type / cfg.vid_name
         deno_fns = uformer.utils.io.save_burst(deno,out_dir,"deno",
                                                fstart=fstart,div=1.,fmt="np")
         deno_fns = uformer.utils.io.save_burst(deno,out_dir,"deno",
@@ -171,12 +155,6 @@ def run_exp(cfg):
         #                             fstart=fstart,div=1.,fmt="np")
         # uformer.utils.io.save_burst(noisy,out_dir,"noisy",
         #                             fstart=fstart,div=1.,fmt="np")
-
-        # -- stacked to full image --
-        # if not(blocks is None):
-        #     clean = full2stacked(clean,blocks)
-        #     noisy = full2stacked(noisy,blocks)
-        #     deno = full2stacked(deno,blocks)
 
         # -- psnr --
         noisy_psnrs = compute_psnr(clean,noisy,div=imax)
@@ -193,12 +171,19 @@ def run_exp(cfg):
         results.ssims.append(ssims)
         results.adapt_psnrs.append(adapt_psnrs)
         results.deno_fns.append(deno_fns)
-        results.vid_frames.append(vid_frames)
+        results.vid_frames.append(vid_frames.numpy())
         results.vid_name.append([cfg.vid_name])
         for name,time in timer.items():
             results[name].append(time)
 
     return results
+
+def load_checkpoint(model,use_train):
+    if use_train == "true":
+        mpath = "output/checkpoints/495a624d-ddd1-4289-a674-a64dd2b9c03d-epoch=01-val_loss=1.59e-04.ckpt"
+        state = th.load(mpath)['state_dict']
+        lightning.remove_lightning_load_state(state)
+        model.load_state_dict(state)
 
 def compute_ssim(clean,deno,div=255.):
     nframes = clean.shape[0]
@@ -211,14 +196,14 @@ def compute_ssim(clean,deno,div=255.):
     ssims = np.array(ssims)
     return ssims
 
-def prepare_sidd(records):
+def prepare_sidd(records,name):
 
     # -- load denoised files --
     deno_all_fns = list(np.stack(records['deno_fns'].to_numpy()))
     denos = []
     for deno_vid_fns in deno_all_fns:
         deno_vid = []
-        for fn_t in deno_vid_fns:
+        for fn_t in deno_vid_fns[0]:
             if "png" in fn_t:
                 frame_t = np.array(Image.open(fn_t))
             else:
@@ -240,14 +225,22 @@ def prepare_sidd(records):
     # print(time_mp)
     # print(denos.shape)
 
+    # -- out dir --
+    out_dir = Path("output/sidd_submit/%s/" % name)
+    if not out_dir.exists():
+        out_dir.mkdir()
+
     # -- filenames --
     fn_og = "output/sidd_submit/SubmitSrgbFromMatlab.mat"
-    fn = "output/sidd_submit/SubmitSrgb.mat"
-    os.remove(fn) # remove old
+    fn = out_dir / "SubmitSrgb.mat"
+    if fn.exists():
+        os.remove(str(fn)) # remove old
+    fn = str(fn)
 
     # -- read --
     data = hdf5storage.loadmat(fn_og)
     del data['DenoisedBlocksSrgb']
+    print(denos.shape)
     data['DenoisedBlocksSrgb'] = denos
     hdf5storage.savemat(fn,data)
 
@@ -278,22 +271,22 @@ def main():
     # -- (0) start info --
     verbose = True
     pid = os.getpid()
-    # print("PID: ",pid)
+    print("PID: ",pid)
 
     # -- get cache --
     cache_dir = ".cache_io"
     # cache_name = "test_rgb_net"
     cache_name = "sidd_rgb_bench"
     cache = cache_io.ExpCache(cache_dir,cache_name)
-    cache.clear()
+    # cache.clear()
 
     # -- get mesh --
-    # dnames = ["sidd_bench_full"]
-    dnames = ["sidd_rgb"]
+    # dnames = ["sidd_rgb"]
     # dnames = ["sidd_rgb_bench"]
+    dnames = ["sidd_rgb_val"]
     dset = ["val"]
     vid_names = ["%02d" % x for x in np.arange(0,40)]
-    vid_names = [vid_names[0]]
+    vid_names = vid_names[:4]
 
     # dnames = ["set8"]
     # vid_names = ["park_joy"]
@@ -305,16 +298,19 @@ def main():
     ws,wt = [7],[10]
     mtypes = ["rand"]
     isizes = ["none"]
-    stride = [8]
+    stride = [4,8]
+    use_train = ["true"]
     model_type = ["aug_original"]
     exp_lists = {"dname":dnames,"vid_name":vid_names,"dset":dset,
                  "internal_adapt_nsteps":internal_adapt_nsteps,
                  "internal_adapt_nepochs":internal_adapt_nepochs,
                  "flow":flow,"ws":ws,"wt":wt,"model_type":model_type,
-                 "adapt_mtype":mtypes,"isize":isizes,"stride":stride}
+                 "adapt_mtype":mtypes,"isize":isizes,"stride":stride,
+                 "use_train":use_train}
     exps_a = cache_io.mesh_pydicts(exp_lists) # create mesh
 
     # -- exps version 2 --
+    exp_lists['use_train'] = ["false"]
     exp_lists['stride'] = [8]
     exp_lists['model_type'] = ['original']
     exps_b = cache_io.mesh_pydicts(exp_lists) # create mesh
@@ -341,7 +337,8 @@ def main():
 
         # -- logic --
         uuid = cache.get_uuid(exp) # assing ID to each Dict in Meshgrid
-        # cache.clear_exp(uuid)
+        if exp.use_train == "true":
+            cache.clear_exp(uuid)
         results = cache.load_exp(exp) # possibly load result
         if results is None: # check if no result
             exp.uuid = uuid
@@ -352,14 +349,19 @@ def main():
     records = cache.load_flat_records(exps)
 
     for model_type,mdf in records.groupby("model_type"):
-        for stride,sdf in mdf.groupby("stride"):
-            ssims = np.stack(np.array(sdf['ssims']))
-            psnrs = np.stack(np.array(sdf['psnrs']))
-            ssims_m = ssims.mean()
-            psnrs_m = psnrs.mean()
-            print(model_type,stride,psnrs_m,ssims_m)
+        for use_tr,tdf in mdf.groupby("use_train"):
+            for stride,sdf in tdf.groupby("stride"):
+                for vname,vdf in sdf.groupby("vid_name"):
+                    ssims = np.stack(np.array(vdf['ssims'])).ravel()
+                    psnrs = np.stack(np.array(vdf['psnrs'])).ravel()
+                    ssims_m = ssims.mean()
+                    psnrs_m = psnrs.mean()
+                    print(model_type,use_tr,vname,stride,psnrs_m,ssims_m)
+    exit(0)
 
-    # prepare_sidd(records)
+    for model_type,mdf in records.groupby('model_type'):
+        print(mdf['deno_fns'])
+        prepare_sidd(mdf,model_type)
     exit(0)
     print(records)
     print(records.filter(like="timer"))

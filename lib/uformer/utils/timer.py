@@ -13,6 +13,11 @@ class ExpTimer():
             msg += "\n%s: %2.3f\n" % (k,v)
         return msg
 
+    def __getitem__(self,name):
+        idx = self.names.index(name)
+        total_time = self.times[idx]
+        return total_time
+
     def items(self):
         names = ["timer_%s" % name for name in self.names]
         return zip(names,self.times)

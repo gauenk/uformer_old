@@ -18,6 +18,7 @@ import torch.utils.checkpoint as checkpoint
 # -- local imports --
 from .window_utils import window_partition,window_reverse
 from .window_attn import WindowAttention
+from .self_attn import Attention
 from .window_attn_aug import WindowAttentionAugmented
 from .embedding_modules import Mlp,LeFF
 
@@ -25,15 +26,15 @@ class BasicUformerLayer(nn.Module):
     def __init__(self, dim, output_dim, input_resolution, depth, num_heads, win_size,
                  mlp_ratio=4., qkv_bias=True, qk_scale=None, drop=0., attn_drop=0.,
                  drop_path=0., norm_layer=nn.LayerNorm, use_checkpoint=False,
-                 token_projection='linear',token_mlp='ffn',se_layer=False,
-                 fwd_mode="dnls_k",stride=None,ws=-1,wt=0,k=-1,sb=None):
+                 token_projection='linear',token_mlp='ffn',
+                 modulator=False, cross_modulator=False,
+                 fwd_mode="dnls_k", stride=None, ws=-1, wt=0, k=-1, sb=None):
 
         super().__init__()
         self.dim = dim
         self.input_resolution = input_resolution
         self.depth = depth
         self.use_checkpoint = use_checkpoint
-
 
         # -- relevant params --
         self.fwd_mode = fwd_mode
@@ -56,7 +57,9 @@ class BasicUformerLayer(nn.Module):
                   drop_path=drop_path[i] if is_list else drop_path,
                   norm_layer=norm_layer,
                   token_projection=token_projection,
-                  token_mlp=token_mlp,se_layer=se_layer,
+                  token_mlp=token_mlp,
+                  modulator=modulator,
+                  cross_modulator=cross_modulator,
                   fwd_mode=fwd_mode,stride=stride,
                   ws=ws,wt=wt,k=k,sb=sb)
             for i in range(depth)])
@@ -82,7 +85,8 @@ class LeWinTransformerBlockRefactored(nn.Module):
     def __init__(self, dim, input_resolution, num_heads, win_size=8, shift_size=0,
                  mlp_ratio=4., qkv_bias=True, qk_scale=None, drop=0., attn_drop=0.,
                  drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm,
-                 token_projection='linear',token_mlp='leff',se_layer=False,
+                 token_projection='linear',token_mlp='leff',
+                 modulator=False, cross_modulator=False,
                  fwd_mode="dnls_k",stride=None,ws=-1,wt=0,k=-1,sb=None):
         super().__init__()
         self.dim = dim
@@ -101,6 +105,22 @@ class LeWinTransformerBlockRefactored(nn.Module):
         self.k = k
         self.sb = sb
 
+        # -- modulation layers --
+        if modulator:
+            self.modulator = nn.Embedding(win_size*win_size, dim) # modulator
+        else:
+            self.modulator = None
+
+        if cross_modulator:
+            self.cross_modulator = nn.Embedding(win_size*win_size, dim) # cross_modulator
+            self.cross_attn = Attention(dim,num_heads,qkv_bias=qkv_bias,
+                                        qk_scale=qk_scale, attn_drop=attn_drop,
+                                        proj_drop=drop,
+                    token_projection=token_projection,)
+            self.norm_cross = norm_layer(dim)
+        else:
+            self.cross_modulator = None
+
         if min(self.input_resolution) <= self.win_size:
             self.shift_size = 0
             self.win_size = min(self.input_resolution)
@@ -111,13 +131,13 @@ class LeWinTransformerBlockRefactored(nn.Module):
             self.attn = WindowAttentionAugmented(
                 dim, win_size=to_2tuple(self.win_size), num_heads=num_heads,
                 qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop,
-                proj_drop=drop,token_projection=token_projection,se_layer=se_layer,
+                proj_drop=drop,token_projection=token_projection,
                 stride=stride,ws=ws,wt=wt,k=k,sb=sb)
         elif fwd_mode == "original":
             self.attn = WindowAttention(
                 dim, win_size=to_2tuple(self.win_size), num_heads=num_heads,
                 qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop,
-                proj_drop=drop,token_projection=token_projection,se_layer=se_layer,
+                proj_drop=drop,token_projection=token_projection,
                 stride=stride,ws=ws,wt=wt,k=k,sb=sb)
         else:
             raise ValueError(f"Uknown fwd_mode [{fwd_mode}]")
@@ -173,7 +193,12 @@ class LeWinTransformerBlockRefactored(nn.Module):
             shift_attn_mask = shift_attn_mask.masked_fill(shift_attn_mask != 0, float(-100.0)).masked_fill(shift_attn_mask == 0, float(0.0))
             attn_mask = attn_mask + shift_attn_mask if attn_mask is not None else shift_attn_mask
 
-            # print("attn_mask.shape: ",attn_mask.shape)
+        if self.cross_modulator is not None:
+            shortcut = x
+            x_cross = self.norm_cross(x)
+            x_cross = self.cross_attn(x, self.cross_modulator.weight)
+            x = shortcut + x_cross
+
         shortcut = x
         x = self.norm1(x)
         x = x.view(B, H, W, C)
@@ -187,7 +212,8 @@ class LeWinTransformerBlockRefactored(nn.Module):
 
         # -- window region with channel attention --
         stride = self.stride
-        shifted_x = self._window_region(shifted_x,attn_mask,stride,flows,region,H,W,C)
+        shifted_x = self._window_region(shifted_x,attn_mask,stride,flows,region,H,W,C,
+                                        self.modulator)
 
         # reverse cyclic shift
         if self.shift_size > 0:
@@ -209,16 +235,18 @@ class LeWinTransformerBlockRefactored(nn.Module):
 
         return x
 
-    def _window_region(self,shifted_x,attn_mask,stride,flows,region,H,W,C):
+    def _window_region(self,shifted_x,attn_mask,stride,flows,region,H,W,C,modulator):
         if self.fwd_mode == "dnls_k":
             return self._window_region_dnls_k(shifted_x,attn_mask,stride,
-                                              flows,region,H,W,C)
+                                              flows,region,H,W,C,modulator)
         elif self.fwd_mode == "original":
-            return self._window_region_original(shifted_x,attn_mask,stride,region,H,W,C)
+            return self._window_region_original(shifted_x,attn_mask,
+                                                stride,region,H,W,C,modulator)
         else:
             raise ValueError(f"Uknown forward mode [{self.fwd_mode}]")
 
-    def _window_region_dnls_k(self,shifted_x,attn_mask,stride,flows,region,H,W,C):
+    def _window_region_dnls_k(self,shifted_x,attn_mask,stride,flows,
+                              region,H,W,C,modulator):
 
         # partition windows
         # x_windows = window_partition(shifted_x, self.win_size,
@@ -228,7 +256,7 @@ class LeWinTransformerBlockRefactored(nn.Module):
 
         # W-MSA/SW-MSA
         # print("pre-attn.")
-        attn_windows = self.attn(shifted_x, flows, mask=attn_mask)
+        attn_windows = self.attn(shifted_x, flows, modulator, mask=attn_mask)
         # nW*B, win_size*win_size, C
         # print("attn_windows.shape: ",attn_windows.shape)
         # print("post-attn.")
@@ -239,7 +267,8 @@ class LeWinTransformerBlockRefactored(nn.Module):
         #                            stride=stride, region=region)  # B H' W' C
         return attn_windows
 
-    def _window_region_original(self,shifted_x,attn_mask,stride,region,H,W,C):
+    def _window_region_original(self,shifted_x,attn_mask,stride,
+                                region,H,W,C,modulator):
 
         # partition windows
         # x_windows = window_partition(shifted_x, self.win_size,
@@ -249,7 +278,7 @@ class LeWinTransformerBlockRefactored(nn.Module):
 
         # W-MSA/SW-MSA
         # print("pre-attn.")
-        attn_windows = self.attn(shifted_x, mask=attn_mask)  # nW*B, win_size*win_size, C
+        attn_windows = self.attn(shifted_x, modulator, mask=attn_mask)  # nW*B, win_size*win_size, C
         # print("attn_windows.shape: ",attn_windows.shape)
         # print("post-attn.")
 

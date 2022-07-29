@@ -140,7 +140,7 @@ def test_original_augmented(sigma,ref_version):
     isize = "128_128"
     dset = "te"
     flow = False
-    # ref_version = "original"
+    noise_version = "blur"
 
     # -- setup cfg --
     cfg = edict()
@@ -171,7 +171,7 @@ def test_original_augmented(sigma,ref_version):
     flows.bflow = th.zeros((t,2,h,w),device=noisy.device)
 
     # -- original exec --
-    og_model = uformer.original.load_model(sigma)
+    og_model = uformer.original.load_model(sigma,noise_version=noise_version)
     with th.no_grad():
         deno_og = og_model(noisy.clone()).detach()
 
@@ -180,7 +180,8 @@ def test_original_augmented(sigma,ref_version):
     region = None#[0,t,0,0,h,w] if ref_version == "ref" else None
     fwd_mode = "original"
     # fwd_mode = "dnls_k"
-    ref_model = uformer.augmented.load_model(sigma,fwd_mode=fwd_mode,stride=8)
+    ref_model = uformer.augmented.load_model(sigma,fwd_mode=fwd_mode,
+                                             stride=8,noise_version=noise_version)
     with th.no_grad():
         deno_ref = ref_model(noisy,flows=flows,region=region).detach()
 

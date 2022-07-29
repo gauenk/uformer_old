@@ -117,11 +117,12 @@ def launch_training(cfg):
     chkpt_fn = cfg.uuid + "-{epoch:02d}"
     cc_recent = ModelCheckpoint(monitor="epoch",save_top_k=10,mode="max",
                                 dirpath=cfg.checkpoint_dir,filename=chkpt_fn)
-    swa_callback = StochasticWeightAveraging(swa_lrs=1e-4)
+    # swa_callback = StochasticWeightAveraging(swa_lrs=1e-6)
     trainer = pl.Trainer(gpus=2,precision=32,limit_train_batches=1.,
-                         max_epochs=cfg.nepochs-1,log_every_n_steps=1,
-                         logger=logger,gradient_clip_val=0.5,
-                         callbacks=[checkpoint_callback,swa_callback,cc_recent])
+                         max_epochs=cfg.nepochs,log_every_n_steps=1,
+                         logger=logger,gradient_clip_val=0.,
+                         callbacks=[checkpoint_callback],#,swa_callback,cc_recent],
+                         strategy="ddp_find_unused_parameters_false")
     timer.start("train")
     trainer.fit(model, loaders.tr, loaders.val)
     timer.stop("train")
@@ -138,7 +139,10 @@ def launch_training(cfg):
     model.isize = None
     cfg_clone = copy.deepcopy(cfg)
     cfg_clone.isize = None
-    # cfg_clone.cropmode = "center"
+    cfg_clone.isize_tr = "128_128"
+    cfg_clone.cropmode_tr = "center"
+    cfg_clone.batch_size_tr = 1
+    cfg_clone.batch_size_val = 1
     cfg_clone.nsamples_tr = cfg.nsamples_at_testing
     cfg_clone.nsamples_val = cfg.nsamples_at_testing
     data,loaders = data_hub.sets.load(cfg_clone)
@@ -194,26 +198,32 @@ def main():
     cache_dir = ".cache_io"
     cache_name = "train_rgb_net"
     cache = cache_io.ExpCache(cache_dir,cache_name)
-    cache.clear()
+    # cache.clear()
+    # k = 50 is "code" for "aug_original"; typo in lightning
 
     # -- create exp list --
-    ws,wt,k = [20],[5],[100]
-    flow = ['true']
-    isizes = ["none"]
+    ws,wt,k = [20],[5],[50]
+    flow = ['false']
+    # isize = ["128_128"]
+    isize = ["128_128"]
+    # isize = ["none"]
     fwd_mode = ["original"]
-    stride = [2,8]
+    stride = [4]
     exp_lists = {"ws":ws,"wt":wt,"k":k,"stride":stride,
-                 "isize":isizes,"fwd_mode":fwd_mode,'flow':flow}
+                 "isize":isize,"fwd_mode":fwd_mode,'flow':flow}
     exps = cache_io.mesh_pydicts(exp_lists) # create mesh
     nexps = len(exps)
 
     # -- group with default --
     cfg = configs.default_train_cfg()
-    cfg.nsamples_tr = 400
-    cfg.nsamples_val = 30
-    cfg.nepochs = 100
+    cfg.batch_size = 1
+    cfg.batch_size_tr = 15
+    cfg.batch_size_val = 1
+    cfg.nsamples_tr = 0#300*(20*2)
+    cfg.nsamples_val = 5
+    cfg.nepochs = 10
     cfg.persistent_workers = True
-    cfg.batch_size = 4
+    cfg.num_workers = 8
     cache_io.append_configs(exps,cfg) # merge the two
 
     # -- launch each experiment --
@@ -242,33 +252,34 @@ def main():
 
     # -- results --
     records = cache.load_flat_records(exps)
-    print(records.columns)
-    print(records['uuid'])
-    print(records['best_model_path'].iloc[0])
-    print(records['best_model_path'].iloc[1])
+    exit(0)
+    # print(records.columns)
+    # print(records['uuid'])
+    # print(records['best_model_path'].iloc[0])
+    # print(records['best_model_path'].iloc[1])
 
 
-    # -- load res --
-    uuids = list(records['uuid'].to_numpy())
-    cas = list(records['ca_fwd'].to_numpy())
-    fns = list(records['init_val_results_fn'].to_numpy())
-    res_a = read_pickle(fns[0])
-    res_b = read_pickle(fns[1])
-    print(uuids)
-    print(cas)
-    print(res_a['test_psnr'])
-    print(res_a['test_index'])
-    print(res_b['test_psnr'])
-    print(res_b['test_index'])
+    # # -- load res --
+    # uuids = list(records['uuid'].to_numpy())
+    # cas = list(records['ca_fwd'].to_numpy())
+    # fns = list(records['init_val_results_fn'].to_numpy())
+    # res_a = read_pickle(fns[0])
+    # res_b = read_pickle(fns[1])
+    # print(uuids)
+    # print(cas)
+    # print(res_a['test_psnr'])
+    # print(res_a['test_index'])
+    # print(res_b['test_psnr'])
+    # print(res_b['test_index'])
 
-    fns = list(records['val_results_fn'].to_numpy())
-    res_a = read_pickle(fns[0])
-    res_b = read_pickle(fns[1])
-    print(uuids,cas,fns)
-    print(res_a['test_psnr'])
-    print(res_a['test_index'])
-    print(res_b['test_psnr'])
-    print(res_b['test_index'])
+    # fns = list(records['val_results_fn'].to_numpy())
+    # res_a = read_pickle(fns[0])
+    # res_b = read_pickle(fns[1])
+    # print(uuids,cas,fns)
+    # print(res_a['test_psnr'])
+    # print(res_a['test_index'])
+    # print(res_b['test_psnr'])
+    # print(res_b['test_index'])
 
 
 

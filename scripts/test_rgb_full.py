@@ -68,9 +68,13 @@ def run_exp(cfg):
         model = uformer.augmented.load_model(cfg.sigma,fwd_mode=fwd_mode,
                                              stride=cfg.stride)
         tile_h,tile_w = 2048,2048
+    elif cfg.model_type == "none":
+        model = None
+        tile_h,tile_w = 2048,2048
     else:
         raise ValueError(f"Uknown model_type [{model_type}]")
-    model.eval()
+    if not(model is None):
+        model.eval()
     imax = 255.
 
     # -- data --
@@ -112,12 +116,6 @@ def run_exp(cfg):
         noisy,nh,nw = img2tiles(noisy,tile_h,tile_w)
         print("noisy.shape: ",noisy.shape)
 
-        # -- stacked to full image --
-        nstack = noisy.shape[0]
-        # if cfg.full_img == "true":
-        #     blocks = data[cfg.dset].blocks
-        #     noisy = stacked2full(noisy,blocks)
-
         # -- create timer --
         timer = uformer.utils.timer.ExpTimer()
 
@@ -156,14 +154,17 @@ def run_exp(cfg):
         batch_size = 390*100
         timer.start("deno")
         with th.no_grad():
-            t = noisy.shape[0]
-            deno = []
-            for ti in range(t):
-                deno_i = model(noisy[[ti]]/imax)
-                # deno_i = noisy[[ti]]/imax
-                deno.append(deno_i)
-            deno = th.cat(deno)
-            deno = th.clamp(deno,0.,1.)*imax
+            if model is None:
+                deno = noisy
+            else:
+                t = noisy.shape[0]
+                deno = []
+                for ti in range(t):
+                    deno_i = model(noisy[[ti]]/imax)
+                    # deno_i = noisy[[ti]]/imax
+                    deno.append(deno_i)
+                deno = th.cat(deno)
+                deno = th.clamp(deno,0.,1.)*imax
         timer.stop("deno")
 
         # -- create deno img from tiles --
@@ -186,10 +187,12 @@ def run_exp(cfg):
         deno = full2blocks(deno,blocks)
         clean = full2blocks(clean,blocks)
         noisy = full2blocks(noisy,blocks)
-        print("deno.shape: ",deno.shape)
         out_dir_blocks = out_dir / "blocks"
         deno_fns = uformer.utils.io.save_burst(deno,out_dir,"deno",
                                                fstart=fstart,div=1.,fmt="np")
+        uformer.utils.io.save_burst(deno,out_dir,"deno",
+                                    fstart=fstart,div=1.,fmt="image")
+
 
         # -- psnr --
         noisy_psnrs = compute_psnr(clean,noisy,div=imax)
@@ -311,6 +314,7 @@ def main():
     dset = ["val"]
     vid_names = ["%02d" % x for x in np.arange(0,40)]
     # vid_names = [vid_names[0]]
+    # # vid_names = vid_names[35:]
 
     # -- get mesh --
     internal_adapt_nsteps = [300]
@@ -356,7 +360,8 @@ def main():
 
         # -- logic --
         uuid = cache.get_uuid(exp) # assing ID to each Dict in Meshgrid
-        # cache.clear_exp(uuid)
+        if exp.model_type == "none":
+            cache.clear_exp(uuid)
         results = cache.load_exp(exp) # possibly load result
         if results is None: # check if no result
             exp.uuid = uuid
@@ -368,13 +373,18 @@ def main():
 
     for model_type,mdf in records.groupby("model_type"):
         for stride,sdf in mdf.groupby("stride"):
-            ssims = np.stack(np.array(sdf['ssims']))
-            psnrs = np.stack(np.array(sdf['psnrs']))
-            ssims_m = ssims.mean()
-            psnrs_m = psnrs.mean()
+            ssims_m,psnrs_m = [],[]
+            for vid_name,vdf in sdf.groupby("vid_name"):
+                ssims = np.stack(np.array(vdf['ssims']))
+                psnrs = np.stack(np.array(vdf['psnrs']))
+                ssims_m.append(ssims.mean())
+                psnrs_m.append(psnrs.mean())
+            ssims_m = np.mean(ssims_m)
+            psnrs_m = np.mean(psnrs_m)
             print(model_type,stride,psnrs_m,ssims_m)
 
     for model_type,mdf in records.groupby('model_type'):
+        print(mdf['deno_fns'])
         prepare_sidd(mdf,model_type)
     exit(0)
     print(records)
