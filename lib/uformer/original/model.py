@@ -5,6 +5,7 @@
 """
 
 import torch
+import torch as th
 import torch.nn as nn
 import torch.utils.checkpoint as checkpoint
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
@@ -347,45 +348,90 @@ class WindowAttention(nn.Module):
         trunc_normal_(self.relative_position_bias_table, std=.02)
         self.softmax = nn.Softmax(dim=-1)
 
+    def silly_fill(self,q,k,v):
+        import numpy as np
+        B,H,N,C = q.shape
+        nh = int(np.sqrt(B/32))
+        num = int(q.numel())
+        anum = th.arange(num)
+        shape_str = '(t nh nw) H (wh ww) c -> t (H c) (nh wh) (nw ww)'
+        # print(B/32)
+        # print(q.shape)
+        q = rearrange(q,shape_str,t=32,nh=nh,wh=8)
+        k = rearrange(k,shape_str,t=32,nh=nh,wh=8)
+        v = rearrange(v,shape_str,t=32,nh=nh,wh=8)
+        # print(q.shape)
+        q[...] = anum.reshape(q.shape).to(q.device)
+        k[...] = anum.reshape(q.shape).to(q.device)
+        # v[...] = anum.reshape(q.shape).to(q.device)
+        # if v.shape[-1] > 9:
+        #     print(v[10,::H,9,9])
+
+        shape_str = 't (H c) (nh wh) (nw ww) -> (t nh nw) H (wh ww) c'
+        q = rearrange(q,shape_str,H=H,nh=nh,ww=8)
+        k = rearrange(k,shape_str,H=H,nh=nh,ww=8)
+        v = rearrange(v,shape_str,H=H,nh=nh,ww=8)
+        return q,k,v
+
     def forward(self, x, attn_kv=None, mask=None):
         B_, N, C = x.shape
-        # print("[wattn] x.shape: ",x.shape)
-        q, k, v = self.qkv(x,attn_kv)
+        # print("[wattn] x.shape: ",x.shape,self.num_heads)
+        q, k, v = self.qkv(x,None)#attn_kv)
         # print("[wattn] q.shape, k.shape, v.shape: ",q.shape,k.shape,v.shape)
+        # q[...] = 1
+        # k[...] = 1
+        # print(q)
+        # q,k,_ = self.silly_fill(q,k,v)
+        # print(q)
+        # exit(0)
+        # v[...] = 1
+
         q = q * self.scale
-        # print("[wattn] q.shape: ",q.shape)
         attn = (q @ k.transpose(-2, -1))
         # print("[wattn] attn.shape: ",attn.shape,self.num_heads)
 
-        relative_position_bias = self.relative_position_bias_table[self.relative_position_index.view(-1)].view(
-            self.win_size[0] * self.win_size[1], self.win_size[0] * self.win_size[1], -1)  # Wh*Ww,Wh*Ww,nH
-        relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()  # nH, Wh*Ww, Wh*Ww
-        ratio = attn.size(-1)//relative_position_bias.size(-1)
-        # print("relative_position_bias.shape: ",relative_position_bias.shape)
-        relative_position_bias = repeat(relative_position_bias, 'nH l c -> nH l (c d)', d = ratio)
-        assert ratio == 1
+        # relative_position_bias = self.relative_position_bias_table[self.relative_position_index.view(-1)].view(
+        #     self.win_size[0] * self.win_size[1], self.win_size[0] * self.win_size[1], -1)  # Wh*Ww,Wh*Ww,nH
+        # relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()  # nH, Wh*Ww, Wh*Ww
+        # ratio = attn.size(-1)//relative_position_bias.size(-1)
+        # # print("relative_position_bias.shape: ",relative_position_bias.shape)
+        # relative_position_bias = repeat(relative_position_bias, 'nH l c -> nH l (c d)', d = ratio)
+        # assert ratio == 1
 
         # print("attn.shape: ",attn.shape)
-        attn = attn + relative_position_bias.unsqueeze(0)
+        # attn = attn + relative_position_bias.unsqueeze(0)
 
-        if mask is not None:
-            nW = mask.shape[0]
-            mask = repeat(mask, 'nW m n -> nW m (n d)',d = ratio)
-            attn = attn.view(B_ // nW, nW, self.num_heads, N, N*ratio)
-            attn += mask.unsqueeze(1).unsqueeze(0)
-            attn = attn.view(-1, self.num_heads, N, N*ratio)
-            attn = self.softmax(attn)
-        else:
-            attn = self.softmax(attn)
+        # if mask is not None:
+        #     nW = mask.shape[0]
+        #     mask = repeat(mask, 'nW m n -> nW m (n d)',d = ratio)
+        #     attn = attn.view(B_ // nW, nW, self.num_heads, N, N*ratio)
+        #     attn += mask.unsqueeze(1).unsqueeze(0)
+        #     attn = attn.view(-1, self.num_heads, N, N*ratio)
+        #     attn = self.softmax(attn)
+        # else:
+        #     attn = self.softmax(attn)
+        # attn = self.attn_drop(attn)
 
-        attn = self.attn_drop(attn)
+        attn = self.softmax(attn)
+        # v[...] = 1
+        # print("q.shape: ",q.shape)
+        # print("v.shape: ",v.shape)
+        # print(attn[0,0,0,0])
+        # print("attn.shape: ",attn.shape)
 
         x = (attn @ v)
-        x = x.transpose(1, 2).reshape(B_, N, C)
-        x = self.proj(x)
-        x = self.se_layer(x)
-        x = self.proj_drop(x)
+        x = x.transpose(1, 2)
+        # print("x.shape: ",x.shape,C)
+        x = x.reshape(B_, N, C)
+        # print("[orig] x.shape: ",x.shape)
+        # print(x[0,0,0])
 
+        # exit(0)
+        x = self.proj(x)
+        # x = self.se_layer(x)
+        # x = self.proj_drop(x) # TODO: remove me.
+
+        # print("x.shape: ",x.shape)
         return x
 
     def extra_repr(self) -> str:
@@ -447,20 +493,21 @@ class Attention(nn.Module):
 
         # attn = attn + relative_position_bias.unsqueeze(0)
 
-        if mask is not None:
-            nW = mask.shape[0]
-            # mask = repeat(mask, 'nW m n -> nW m (n d)',d = ratio)
-            attn = attn.view(B_ // nW, nW, self.num_heads, N, N) + mask.unsqueeze(1).unsqueeze(0)
-            attn = attn.view(-1, self.num_heads, N, N)
-            attn = self.softmax(attn)
-        else:
-            attn = self.softmax(attn)
+        # if mask is not None:
+        #     nW = mask.shape[0]
+        #     # mask = repeat(mask, 'nW m n -> nW m (n d)',d = ratio)
+        #     attn = attn.view(B_ // nW, nW, self.num_heads, N, N) + mask.unsqueeze(1).unsqueeze(0)
+        #     attn = attn.view(-1, self.num_heads, N, N)
+        #     attn = self.softmax(attn)
+        # else:
+        #     attn = self.softmax(attn)
 
-        attn = self.attn_drop(attn)
+        attn = self.softmax(attn)
+        # attn = self.attn_drop(attn)
 
         x = (attn @ v).transpose(1, 2).reshape(B_, N, C)
         x = self.proj(x)
-        x = self.proj_drop(x)
+        # x = self.proj_drop(x)
         return x
 
     def extra_repr(self) -> str:
@@ -504,9 +551,9 @@ class Mlp(nn.Module):
     def forward(self, x):
         x = self.fc1(x)
         x = self.act(x)
-        x = self.drop(x)
+        # x = self.drop(x)
         x = self.fc2(x)
-        x = self.drop(x)
+        # x = self.drop(x)
         return x
 
     def flops(self, H, W):
@@ -744,6 +791,7 @@ class LeWinTransformerBlock(nn.Module):
             qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop,
             token_projection=token_projection)
 
+        drop_path = 0.
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
@@ -812,9 +860,12 @@ class LeWinTransformerBlock(nn.Module):
 
         # partition windows
         x_windows = window_partition(shifted_x, self.win_size)  # nW*B, win_size, win_size, C  N*C->C
+        # print("x_windows.shape: ",x_windows.shape)
         x_windows = x_windows.view(-1, self.win_size * self.win_size, C)  # nW*B, win_size*win_size, C
 
+        # self.modulator = None
         if self.modulator is not None:
+            # print("x_windows.shape: ",x_windows.shape,self.modulator.weight.shape)
             wmsa_in = self.with_pos_embed(x_windows,self.modulator.weight)
         else:
             wmsa_in = x_windows
@@ -1459,8 +1510,9 @@ class Uformer(nn.Module):
     def forward(self, x, mask=None):
         # Input Projection
 
+        # print("x.shape: ",x.shape)
         y = self.input_proj(x)
-        y = self.pos_drop(y)
+        # y = self.pos_drop(y)
         #Encoder
         # print("y.shape: ",y.shape)
         conv0 = self.encoderlayer_0(y,mask=mask)
@@ -1469,6 +1521,7 @@ class Uformer(nn.Module):
         conv1 = self.encoderlayer_1(pool0,mask=mask)
         pool1 = self.dowsample_1(conv1)
         conv2 = self.encoderlayer_2(pool1,mask=mask)
+        # exit(0)
         # print("conv2.shape: ",conv2.shape)
         pool2 = self.dowsample_2(conv2)
         # print("pool2.shape: ",pool2.shape)
@@ -1720,7 +1773,7 @@ class Uformer_Cross(nn.Module):
     def forward(self, x, mask=None):
         # Input Projection
         y = self.input_proj(x)
-        y = self.pos_drop(y)
+        # y = self.pos_drop(y)
 
         # Encoder
         conv0 = self.encoderlayer_0(y, mask=mask)
@@ -1972,7 +2025,7 @@ class Uformer_CatCross(nn.Module):
     def forward(self, x, mask=None):
         # Input Projection
         y = self.input_proj(x)
-        y = self.pos_drop(y)
+        # y = self.pos_drop(y)
         # Encoder
         conv0 = self.encoderlayer_0(y, mask=mask)
         pool0 = self.dowsample_0(conv0)
@@ -2306,7 +2359,7 @@ class Uformer_singlescale(nn.Module):
     def forward(self, x, mask=None):
         # Input Projection
         y = self.input_proj(x)
-        y = self.pos_drop(y)
+        # y = self.pos_drop(y)
         #Encoder
         conv0 = self.encoderlayer_0(y,mask=mask)
         pool0 = self.downsample_0(conv0)

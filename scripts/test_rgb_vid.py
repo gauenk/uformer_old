@@ -58,7 +58,7 @@ def run_exp(cfg):
     elif cfg.model_type == "aug_original":
         fwd_mode = "original"
         model = uformer.augmented.load_model(cfg.sigma,fwd_mode=fwd_mode,
-                                             stride=cfg.stride,sb=32*1024)
+                                             stride=cfg.stride,sb=8*1024)
     elif cfg.model_type == "aug_dnls_k":
         fwd_mode = "dnls_k"
         model = uformer.augmented.load_model(cfg.sigma,fwd_mode=fwd_mode,
@@ -180,7 +180,8 @@ def run_exp(cfg):
 
 def load_checkpoint(model,use_train):
     if use_train == "true":
-        mpath = "output/checkpoints/495a624d-ddd1-4289-a674-a64dd2b9c03d-epoch=01-val_loss=1.59e-04.ckpt"
+        mpath = "output/checkpoints/df2d24cc-aa58-4938-b433-c5d116983893-epoch=52.ckpt"
+        # mpath = "output/checkpoints/44006e54-ddb2-4776-8cb0-e86edc464370-epoch=09-val_loss=1.55e-04.ckpt"
         state = th.load(mpath)['state_dict']
         lightning.remove_lightning_load_state(state)
         model.load_state_dict(state)
@@ -286,7 +287,7 @@ def main():
     dnames = ["sidd_rgb_val"]
     dset = ["val"]
     vid_names = ["%02d" % x for x in np.arange(0,40)]
-    vid_names = vid_names[:4]
+    vid_names = vid_names[1:2]
 
     # dnames = ["set8"]
     # vid_names = ["park_joy"]
@@ -298,9 +299,9 @@ def main():
     ws,wt = [7],[10]
     mtypes = ["rand"]
     isizes = ["none"]
-    stride = [4,8]
-    use_train = ["true"]
-    model_type = ["aug_original"]
+    stride = [8]
+    use_train = ["false"]
+    model_type = ["aug_original","aug_dnls_k"]
     exp_lists = {"dname":dnames,"vid_name":vid_names,"dset":dset,
                  "internal_adapt_nsteps":internal_adapt_nsteps,
                  "internal_adapt_nepochs":internal_adapt_nepochs,
@@ -314,7 +315,7 @@ def main():
     exp_lists['stride'] = [8]
     exp_lists['model_type'] = ['original']
     exps_b = cache_io.mesh_pydicts(exp_lists) # create mesh
-    exps = exps_a + exps_b
+    exps = exps_b# + exps_a
 
     # -- group with default --
     cfg = default_cfg()
@@ -337,8 +338,14 @@ def main():
 
         # -- logic --
         uuid = cache.get_uuid(exp) # assing ID to each Dict in Meshgrid
-        if exp.use_train == "true":
+        if exp.model_type == "original":
             cache.clear_exp(uuid)
+        # if exp.model_type == "aug_original":
+        #     cache.clear_exp(uuid)
+        # if exp.model_type == "aug_dnls_k":
+        #     cache.clear_exp(uuid)
+        # if exp.use_train == "true":
+        #     cache.clear_exp(uuid)
         results = cache.load_exp(exp) # possibly load result
         if results is None: # check if no result
             exp.uuid = uuid
@@ -354,9 +361,12 @@ def main():
                 for vname,vdf in sdf.groupby("vid_name"):
                     ssims = np.stack(np.array(vdf['ssims'])).ravel()
                     psnrs = np.stack(np.array(vdf['psnrs'])).ravel()
+                    dtimes = np.stack(np.array(vdf['timer_deno'])).ravel()
                     ssims_m = ssims.mean()
                     psnrs_m = psnrs.mean()
-                    print(model_type,use_tr,vname,stride,psnrs_m,ssims_m)
+                    dtimes_m = dtimes.mean()
+                    print(model_type,use_tr,vname,stride,psnrs_m,ssims_m,dtimes)
+
     exit(0)
 
     for model_type,mdf in records.groupby('model_type'):

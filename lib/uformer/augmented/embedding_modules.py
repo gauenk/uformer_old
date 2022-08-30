@@ -12,7 +12,8 @@ from einops import rearrange, repeat
 from .conv_modules import SepConv2d
 
 class ConvProjection(nn.Module):
-    def __init__(self, dim, heads = 8, dim_head = 64, kernel_size=3, q_stride=1, k_stride=1, v_stride=1, dropout = 0.,
+    def __init__(self, dim, heads = 8, dim_head = 64, kernel_size=3,
+                 q_stride=1, k_stride=1, v_stride=1, dropout = 0.,
                  last_stage=False,bias=True):
 
         super().__init__()
@@ -40,6 +41,48 @@ class ConvProjection(nn.Module):
         v = self.to_v(attn_kv)
         k = rearrange(k, 'b (h d) l w -> b h (l w) d', h=h)
         v = rearrange(v, 'b (h d) l w -> b h (l w) d', h=h)
+        return q,k,v
+
+    def flops(self, H, W):
+        flops = 0
+        flops += self.to_q.flops(H, W)
+        flops += self.to_k.flops(H, W)
+        flops += self.to_v.flops(H, W)
+        return flops
+
+class ConvProjectionNoReshape(nn.Module):
+    def __init__(self, dim, heads = 8, dim_head = 64, kernel_size=3,
+                 q_stride=1, k_stride=1, v_stride=1, dropout = 0.,
+                 last_stage=False,bias=True):
+
+        super().__init__()
+
+        inner_dim = dim_head *  heads
+        self.heads = heads
+        pad = (kernel_size - q_stride)//2
+        # print("dim,inner_dim,heads: ",dim,inner_dim,heads)
+        self.to_q = nn.Conv2d(dim, inner_dim, kernel_size=kernel_size,
+                              stride=q_stride, padding=pad, bias=bias,
+                              groups=1,padding_mode="reflect")
+        self.to_k = nn.Conv2d(dim, inner_dim, kernel_size=kernel_size,
+                              stride=k_stride, padding=pad, bias=bias,
+                              groups=1,padding_mode="reflect")
+        self.to_v = nn.Conv2d(dim, inner_dim, kernel_size=kernel_size,
+                              stride=v_stride, padding=pad, bias=bias,
+                              groups=1,padding_mode="reflect")
+
+    def forward(self, x, attn_kv=None):
+
+        # -- unpack --
+        b, c, h, w = x.shape
+        nheads = self.heads
+        attn_kv = x if attn_kv is None else attn_kv
+
+        # -- forward --
+        q = self.to_q(x)
+        k = self.to_k(attn_kv)
+        v = self.to_v(attn_kv)
+
         return q,k,v
 
     def flops(self, H, W):
@@ -115,9 +158,9 @@ class Mlp(nn.Module):
     def forward(self, x):
         x = self.fc1(x)
         x = self.act(x)
-        x = self.drop(x)
+        # x = self.drop(x)
         x = self.fc2(x)
-        x = self.drop(x)
+        # x = self.drop(x)
         return x
 
     def flops(self, H, W):

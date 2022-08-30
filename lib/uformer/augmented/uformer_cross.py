@@ -195,7 +195,7 @@ class Uformer_Cross(nn.Module):
     def forward(self, x, mask=None):
         # Input Projection
         y = self.input_proj(x)
-        y = self.pos_drop(y)
+        # y = self.pos_drop(y)
 
         # Encoder
         conv0 = self.encoderlayer_0(y, mask=mask)

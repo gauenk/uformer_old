@@ -16,11 +16,12 @@ def reset_peak_gpu_stats():
     th.cuda.reset_max_memory_allocated()
 
 def print_peak_gpu_stats(verbose,name,reset=True):
-    fmt = "[%s] Peak Memory [GB]: %2.3f"
-    mem = th.cuda.max_memory_allocated(0) / (1024.**3)
+    fmt = "[%s] Peak Memory Allocated [GB]: %2.3f"
+    mem_alloc = th.cuda.max_memory_allocated(0) / (1024.**3)
+    mem_res = th.cuda.max_memory_reserved(0) / (1024.**3)
     if verbose:
         th.cuda.empty_cache()
         th.cuda.synchronize()
-        print(fmt % (name,mem))
+        print(fmt % (name,mem_alloc))
         if reset: th.cuda.reset_peak_memory_stats()
-    return mem
+    return mem_alloc,mem_res

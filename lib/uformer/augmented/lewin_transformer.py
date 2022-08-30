@@ -18,6 +18,7 @@ import torch.utils.checkpoint as checkpoint
 # -- local imports --
 from .window_utils import window_partition,window_reverse
 from .window_attn import WindowAttention
+from .nl_attn import NonLocalAttention
 from .self_attn import Attention
 from .window_attn_aug import WindowAttentionAugmented
 from .embedding_modules import Mlp,LeFF
@@ -128,6 +129,12 @@ class LeWinTransformerBlockRefactored(nn.Module):
 
         self.norm1 = norm_layer(dim)
         if fwd_mode == "dnls_k":
+            self.attn = NonLocalAttention(
+                dim, win_size=to_2tuple(self.win_size), num_heads=num_heads,
+                qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop,
+                proj_drop=drop,token_projection=token_projection,
+                stride=stride,ws=ws,wt=wt,k=k,sb=sb)
+        elif fwd_mode == "dnls_k_window":
             self.attn = WindowAttentionAugmented(
                 dim, win_size=to_2tuple(self.win_size), num_heads=num_heads,
                 qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop,
@@ -142,6 +149,7 @@ class LeWinTransformerBlockRefactored(nn.Module):
         else:
             raise ValueError(f"Uknown fwd_mode [{fwd_mode}]")
 
+        drop_path = 0.
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
@@ -163,7 +171,9 @@ class LeWinTransformerBlockRefactored(nn.Module):
         ## input mask
         if mask != None:
             input_mask = F.interpolate(mask, size=(H,W)).permute(0,2,3,1)
-            input_mask_windows = window_partition(input_mask, self.win_size, region=region) # nW, win_size, win_size, 1
+            # nW, win_size, win_size, 1
+            input_mask_windows = window_partition(input_mask, self.win_size,
+                                                  stride=self.stride, region=region)
             attn_mask = input_mask_windows.view(-1, self.win_size * self.win_size) # nW, win_size*win_size
             attn_mask = attn_mask.unsqueeze(2)*attn_mask.unsqueeze(1) # nW, win_size*win_size, win_size*win_size
             attn_mask = attn_mask.masked_fill(attn_mask!=0, float(-100.0)).masked_fill(attn_mask == 0, float(0.0))
@@ -192,6 +202,7 @@ class LeWinTransformerBlockRefactored(nn.Module):
             shift_attn_mask = shift_mask_windows.unsqueeze(1) - shift_mask_windows.unsqueeze(2) # nW, win_size*win_size, win_size*win_size
             shift_attn_mask = shift_attn_mask.masked_fill(shift_attn_mask != 0, float(-100.0)).masked_fill(shift_attn_mask == 0, float(0.0))
             attn_mask = attn_mask + shift_attn_mask if attn_mask is not None else shift_attn_mask
+            # print("attn_mask.shape: ",attn_mask.shape)
 
         if self.cross_modulator is not None:
             shortcut = x
@@ -210,6 +221,7 @@ class LeWinTransformerBlockRefactored(nn.Module):
         else:
             shifted_x = x
 
+        # self.modulator = None
         # -- window region with channel attention --
         stride = self.stride
         shifted_x = self._window_region(shifted_x,attn_mask,stride,flows,region,H,W,C,
@@ -227,11 +239,11 @@ class LeWinTransformerBlockRefactored(nn.Module):
         # FFN
         x = shortcut + self.drop_path(x)
         x = x + self.drop_path(self.mlp(self.norm2(x),H,W))
-        del attn_mask,shifted_x
+        # del attn_mask,shifted_x
 
         # -- get some space plz --
-        th.cuda.synchronize()
-        th.cuda.empty_cache()
+        # th.cuda.synchronize()
+        # th.cuda.empty_cache()
 
         return x
 
@@ -256,7 +268,8 @@ class LeWinTransformerBlockRefactored(nn.Module):
 
         # W-MSA/SW-MSA
         # print("pre-attn.")
-        attn_windows = self.attn(shifted_x, flows, modulator, mask=attn_mask)
+        attn_windows = self.attn(shifted_x, modulator,
+                                 mask=attn_mask, flows=flows)
         # nW*B, win_size*win_size, C
         # print("attn_windows.shape: ",attn_windows.shape)
         # print("post-attn.")

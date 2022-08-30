@@ -14,7 +14,7 @@ from .uformer import Uformer
 
 # -- misc imports --
 from ..common import optional,select_sigma
-from ..utils.model_utils import load_checkpoint
+from ..utils.model_utils import load_checkpoint,remove_lightning_load_state
 
 def load_model(*args,**kwargs):
 
@@ -68,8 +68,13 @@ def load_model(*args,**kwargs):
     # -- load weights --
     # model_sigma = select_sigma(data_sigma)
     fdir = Path(__file__).absolute().parents[0] / "../../../" # parent of "./lib"
+    lit = False
     if noise_version == "noise":
+        # state_fn = "output/checkpoints/bc1b491e-e536-43a6-9261-88de75c17deb-epoch=15-val_loss=1.58e-04.ckpt"
+        # state_fn = "output/checkpoints/44006e54-ddb2-4776-8cb0-e86edc464370-epoch=09-val_loss=1.55e-04.ckpt"
+        # lit = True
         state_fn = fdir / "models/Uformer_sidd_B.pth"
+        lit = False
     elif noise_version == "blur":
         state_fn = fdir / "models/Uformer_gopro_B.pth"
     else:
@@ -78,7 +83,13 @@ def load_model(*args,**kwargs):
     # model_state = th.load(str(state_fn))
 
     # -- fill weights --
-    load_checkpoint(model,state_fn)
+    if lit is False:
+        load_checkpoint(model,state_fn)
+    else:
+        state = th.load(state_fn)['state_dict']
+        remove_lightning_load_state(state)
+        model.load_state_dict(state)
+
     # load_checkpoint(model,model_state)
     # model.load_state_dict(model_state['state_dict'])
 

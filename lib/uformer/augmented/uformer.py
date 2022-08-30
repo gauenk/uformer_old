@@ -241,7 +241,7 @@ class Uformer(nn.Module):
 
         t,c,H,W = x.shape
         y = self.input_proj(x)
-        y = self.pos_drop(y)
+        # y = self.pos_drop(y)
 
         # -- Encoder --
         h,w = H,W

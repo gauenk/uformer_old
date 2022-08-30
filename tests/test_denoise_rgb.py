@@ -87,7 +87,7 @@ def test_original_refactored(sigma,ref_version):
     cfg.dname = vid_set
     cfg.vid_name = vid_name
     cfg.isize = isize
-    cfg.sigma = 30.
+    cfg.sigma = 5.
 
     # -- video --
     data,loaders = data_hub.sets.load(cfg)
@@ -105,29 +105,29 @@ def test_original_refactored(sigma,ref_version):
     noisy /= 255.
 
     # -- original exec --
-    og_model = uformer.original.load_model(sigma)
+    model_gt = uformer.original.load_model(sigma)
     with th.no_grad():
-        deno_og = og_model(noisy.clone()).detach()
+        deno_gt = model_gt(noisy.clone()).detach()
 
     # -- refactored exec --
     t,c,h,w = noisy.shape
     region = None#[0,t,0,0,h,w] if ref_version == "ref" else None
-    ref_model = uformer.refactored.load_model(sigma,mode=ref_version,stride=8)
+    model_te = uformer.refactored.load_model(sigma,mode=ref_version,stride=8)
     with th.no_grad():
-        deno_ref = ref_model(noisy,region=region).detach()
+        deno_te = model_te(noisy,region=region).detach()
 
     # -- viz --
     if verbose:
-        print(deno_og[0,0,:3,:3])
-        print(deno_ref[0,0,:3,:3])
+        print(deno_gt[0,0,:3,:3])
+        print(deno_te[0,0,:3,:3])
 
     # -- test --
-    error = th.sum((deno_og - deno_ref)**2).item()
+    error = th.sum((deno_gt - deno_te)**2).item()
     if verbose: print("error: ",error)
     assert error < 1e-15
 
 
-def test_original_augmented(sigma,ref_version):
+def test_augmented_fwd(sigma,ref_version):
 
     # -- params --
     device = "cuda:0"
@@ -141,6 +141,9 @@ def test_original_augmented(sigma,ref_version):
     dset = "te"
     flow = False
     noise_version = "blur"
+
+    # -- timer --
+    timer = uformer.utils.timer.ExpTimer()
 
     # -- setup cfg --
     cfg = edict()
@@ -163,6 +166,7 @@ def test_original_augmented(sigma,ref_version):
     noisy,clean = noisy.to(device),clean.to(device)
     vid_frames = sample['fnums']
     noisy /= 255.
+    # print("noisy.shape: ",noisy.shape)
 
     # -- flows --
     t,c,h,w = noisy.shape
@@ -171,27 +175,203 @@ def test_original_augmented(sigma,ref_version):
     flows.bflow = th.zeros((t,2,h,w),device=noisy.device)
 
     # -- original exec --
-    og_model = uformer.original.load_model(sigma,noise_version=noise_version)
+    model_gt = uformer.original.load_model(sigma,noise_version=noise_version)
+    model_gt.eval()
+    timer.start("original")
     with th.no_grad():
-        deno_og = og_model(noisy.clone()).detach()
+        deno_gt = model_gt(noisy.clone()).detach()
+    th.cuda.synchronize()
+    timer.stop("original")
 
     # -- refactored exec --
     t,c,h,w = noisy.shape
     region = None#[0,t,0,0,h,w] if ref_version == "ref" else None
-    fwd_mode = "original"
-    # fwd_mode = "dnls_k"
-    ref_model = uformer.augmented.load_model(sigma,fwd_mode=fwd_mode,
+    # fwd_mode = "original"
+    fwd_mode = "dnls_k"
+    model_te = uformer.augmented.load_model(sigma,fwd_mode=fwd_mode,
                                              stride=8,noise_version=noise_version)
+    model_te.eval()
+    timer.start("aug")
     with th.no_grad():
-        deno_ref = ref_model(noisy,flows=flows,region=region).detach()
+        deno_te = model_te(noisy,flows=flows,region=region).detach()
+    th.cuda.synchronize()
+    timer.stop("aug")
 
     # -- viz --
+    print(timer)
     if verbose:
-        print(deno_og[0,0,:3,:3])
-        print(deno_ref[0,0,:3,:3])
+        print(deno_gt[0,0,:3,:3])
+        print(deno_te[0,0,:3,:3])
+
+    # -- viz --
+    diff_s = th.abs(deno_gt - deno_te)# / (deno_gt.abs()+1e-5)
+    print(diff_s.max())
+    diff_s /= diff_s.max()
+    print("diff_s.shape: ",diff_s.shape)
+    dnls.testing.data.save_burst(diff_s[:3],SAVE_DIR,"diff")
+    dnls.testing.data.save_burst(deno_gt[:3],SAVE_DIR,"deno_gt")
+    dnls.testing.data.save_burst(deno_te[:3],SAVE_DIR,"deno_te")
 
     # -- test --
-    error = th.mean((deno_og - deno_ref)**2).item()
+    error = th.abs(deno_gt - deno_te).mean().item()
     if verbose: print("error: ",error)
-    assert error < 1e-13
+    assert error < 1e-5
 
+
+def test_augmented_bwd(sigma,ref_version):
+
+    # -- params --
+    device = "cuda:0"
+    # vid_set = "sidd_rgb"
+    # vid_name = "00"
+    # dset = "val"
+    vid_set = "set8"
+    vid_name = "motorbike"
+    verbose = True
+    isize = "128_128"
+    dset = "te"
+    flow = False
+    noise_version = "blur"
+
+    # -- timer --
+    timer = uformer.utils.timer.ExpTimer()
+
+    # -- setup cfg --
+    cfg = edict()
+    cfg.dname = vid_set
+    cfg.vid_name = vid_name
+    cfg.isize = isize
+    cfg.sigma = 30.
+    cfg.nframes = 5
+
+    # -- video --
+    data,loaders = data_hub.sets.load(cfg)
+    groups = data[dset].groups
+    indices = [i for i,g in enumerate(groups) if cfg.vid_name in g]
+    index = indices[0]
+
+    # -- unpack --
+    sample = data[dset][index]
+    region = sample['region']
+    noisy,clean = sample['noisy'],sample['clean']
+    noisy,clean = rslice_pair(noisy,clean,region)
+    noisy,clean = noisy.to(device),clean.to(device)
+    vid_frames = sample['fnums']
+    noisy /= 255.
+
+    # -- flows --
+    t,c,h,w = noisy.shape
+    flows = edict()
+    flows.fflow = th.zeros((t,2,h,w),device=noisy.device)
+    flows.bflow = th.zeros((t,2,h,w),device=noisy.device)
+
+    # -- original exec --
+    model_gt = uformer.original.load_model(sigma,noise_version=noise_version)
+    model_gt.train()
+    timer.start("original")
+    deno_gt = model_gt(noisy.clone())
+    th.cuda.synchronize()
+    timer.stop("original")
+
+    # -- refactored exec --
+    t,c,h,w = noisy.shape
+    region = None#[0,t,0,0,h,w] if ref_version == "ref" else None
+    # fwd_mode = "original"
+    fwd_mode = "dnls_k"
+    # model_te = uformer.original.load_model(sigma,noise_version=noise_version)
+    # model_te.train()
+    model_te = uformer.augmented.load_model(sigma,fwd_mode=fwd_mode,
+                                             stride=8,noise_version=noise_version)
+    model_te.train()
+    timer.start("aug")
+    deno_te = model_te(noisy.clone())
+    th.cuda.synchronize()
+    timer.stop("aug")
+
+    # -- viz --
+    print(timer)
+    if verbose:
+        print(deno_gt[0,0,:3,:3])
+        print(deno_te[0,0,:3,:3])
+
+    # -- backward --
+    th.autograd.backward(deno_gt,clean)
+    th.autograd.backward(deno_te,clean)
+    # params_cmp(model_gt,model_te)
+
+    # -- get grads --
+    _,params_gt = pack_params(model_gt)
+    names,params_te = pack_params(model_te)
+
+    # -- viz --
+    diff = th.abs(params_gt - params_te)/(params_gt.abs()+1e-5)
+    args0 = th.where(params_gt.abs()>1.)
+    args = th.where(diff[args0]>1.)
+    print(params_gt[args0][args])
+    print(params_te[args0][args])
+
+    # -- compare --
+    diff = th.abs(params_gt - params_te)/(params_gt.abs()+1e-5)
+    error = diff.mean().item()
+    if verbose: print("error: ",error)
+    assert error < 1e-4
+
+    args = th.where(params_gt.abs() > 1.)
+    error = diff[args].max().item()
+    if verbose: print("error: ",error)
+    assert error < 1e-2
+
+def params_cmp(model_gt,model_te):
+    params_cmp_names(model_gt,model_te)
+    params_cmp_sizes(model_gt,model_te)
+    # exit(0)
+
+def params_cmp_names(model_gt,model_te):
+    names_gt = []
+    for name,param in model_gt.named_parameters():
+        grad = param.grad
+        if grad is None: continue
+
+        names_gt.append(name)
+    names_te = []
+    for name,param in model_te.named_parameters():
+        grad = param.grad
+        if grad is None: continue
+
+        names_te.append(name)
+    names_gt = set(names_gt)
+    names_te = set(names_te)
+    print(names_gt - names_te)
+    print(names_te - names_gt)
+
+def params_cmp_sizes(model_gt,model_te):
+    names_gt = {}
+    for name,param in model_gt.named_parameters():
+        grad = param.grad
+        if grad is None: continue
+        names_gt[name] = np.array(list(grad.size()))
+    names_te = {}
+    for name,param in model_te.named_parameters():
+        grad = param.grad
+        if grad is None: continue
+        names_te[name] = np.array(list(grad.size()))
+    for name,size_gt in names_gt.items():
+        neq = True
+        if name in names_te:
+            size_te = names_te[name]
+            if np.abs(size_gt - size_te).sum() < 1e-10:
+                neq = False
+        if neq:
+            print(name)
+
+def pack_params(model):
+    names,params = [],[]
+    for name,param in model.named_parameters():
+        grad = param.grad
+        if grad is None: continue
+        grad_f = grad.ravel()
+        params.append(grad_f)
+        N = len(grad_f)
+        names.extend([name for _ in range(N)])
+    params = th.cat(params)
+    return names,params

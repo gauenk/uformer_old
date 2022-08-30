@@ -121,7 +121,7 @@ def launch_training(cfg):
     trainer = pl.Trainer(gpus=2,precision=32,limit_train_batches=1.,
                          max_epochs=cfg.nepochs,log_every_n_steps=1,
                          logger=logger,gradient_clip_val=0.,
-                         callbacks=[checkpoint_callback],#,swa_callback,cc_recent],
+                         callbacks=[checkpoint_callback,cc_recent],
                          strategy="ddp_find_unused_parameters_false")
     timer.start("train")
     trainer.fit(model, loaders.tr, loaders.val)
@@ -200,15 +200,15 @@ def main():
     cache = cache_io.ExpCache(cache_dir,cache_name)
     # cache.clear()
     # k = 50 is "code" for "aug_original"; typo in lightning
+    # k = 10 uses 10 epochs already
 
     # -- create exp list --
-    ws,wt,k = [20],[5],[50]
+    ws,wt,k = [20],[5],[20]
     flow = ['false']
     # isize = ["128_128"]
-    isize = ["128_128"]
-    # isize = ["none"]
+    isize = ["none"]
     fwd_mode = ["original"]
-    stride = [4]
+    stride = [2]
     exp_lists = {"ws":ws,"wt":wt,"k":k,"stride":stride,
                  "isize":isize,"fwd_mode":fwd_mode,'flow':flow}
     exps = cache_io.mesh_pydicts(exp_lists) # create mesh
@@ -217,11 +217,11 @@ def main():
     # -- group with default --
     cfg = configs.default_train_cfg()
     cfg.batch_size = 1
-    cfg.batch_size_tr = 15
+    cfg.batch_size_tr = 1
     cfg.batch_size_val = 1
-    cfg.nsamples_tr = 0#300*(20*2)
+    cfg.nsamples_tr = 500*(2*cfg.batch_size_tr)
     cfg.nsamples_val = 5
-    cfg.nepochs = 10
+    cfg.nepochs = 100
     cfg.persistent_workers = True
     cfg.num_workers = 8
     cache_io.append_configs(exps,cfg) # merge the two

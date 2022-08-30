@@ -29,6 +29,7 @@ import uformer.utils.gpu_mem as gpu_mem
 from uformer.utils.timer import ExpTimer
 from uformer.utils.metrics import compute_psnrs,compute_ssims
 from uformer.utils.misc import rslice,write_pickle,read_pickle
+from uformer.utils.model_utils import remove_lightning_load_state
 
 # -- generic logging --
 import logging
@@ -62,7 +63,7 @@ class UformerLit(pl.LightningModule):
         self.gen_loger = logging.getLogger('lightning')
         self.gen_loger.setLevel("NOTSET")
         self.fwd_mode = fwd_mode
-        self.lr = 1e-4
+        self.lr = 5e-5
 
     def forward(self,vid):
         if self.fwd_mode == "dnls_k" or self.fwd_mode == "dnls":
@@ -102,9 +103,10 @@ class UformerLit(pl.LightningModule):
         return flows
 
     def configure_optimizers(self):
-        optim = th.optim.Adam(self.parameters(),lr=self.lr)
+        optim = th.optim.AdamW(self.parameters(),lr=self.lr,
+                               betas=(0.9,0.999),weight_decay=0.02)
         StepLR = th.optim.lr_scheduler.StepLR
-        scheduler = StepLR(optim, step_size=5, gamma=0.1)
+        scheduler = StepLR(optim, step_size=25, gamma=0.5)
         return [optim], [scheduler]
 
     def training_step(self, batch, batch_idx):
@@ -164,7 +166,7 @@ class UformerLit(pl.LightningModule):
         gpu_mem.print_peak_gpu_stats(False,"val",reset=True)
         with th.no_grad():
             deno = self.forward(noisy)
-        mem_gb = gpu_mem.print_peak_gpu_stats(False,"val",reset=True)
+        _,mem_gb = gpu_mem.print_peak_gpu_stats(False,"val",reset=True)
 
         # -- loss --
         loss = th.mean((clean - deno)**2)
@@ -191,7 +193,7 @@ class UformerLit(pl.LightningModule):
         gpu_mem.print_peak_gpu_stats(False,"test",reset=True)
         with th.no_grad():
             deno = self.forward(noisy)
-        mem_gb = gpu_mem.print_peak_gpu_stats(False,"test",reset=True)
+        _,mem_gb = gpu_mem.print_peak_gpu_stats(False,"test",reset=True)
 
         # -- compare --
         loss = th.mean((clean - deno)**2)
@@ -262,13 +264,3 @@ class MetricsCallback(Callback):
     def on_test_batch_end(self, trainer, pl_module, outs,
                           batch, batch_idx, dl_idx):
         self._accumulate_results(outs)
-
-
-
-def remove_lightning_load_state(state):
-    names = list(state.keys())
-    for name in names:
-        name_new = name.split(".")[1:]
-        name_new = ".".join(name_new)
-        state[name_new] = state[name]
-        del state[name]

@@ -74,3 +74,11 @@ def get_arch(opt):
         raise Exception("Arch error!")
 
     return model_restoration
+
+def remove_lightning_load_state(state):
+    names = list(state.keys())
+    for name in names:
+        name_new = name.split(".")[1:]
+        name_new = ".".join(name_new)
+        state[name_new] = state[name]
+        del state[name]

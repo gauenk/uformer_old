@@ -248,7 +248,23 @@ class WindowAttentionAugmented(nn.Module):
         reflect_bounds,use_adj = False,True
         use_k,exact = not(ws == -1),self.exact
         use_search_abs = ws == -1
-        xsearch = dnls.xsearch.CrossSearchNl(fflow, bflow, k, ps, pt, ws, wt,
+        xsearch = dnls.search.init("prod",fflow, bflow, k, ps, pt, ws, wt,
+                                   oh0, ow0, oh1, ow1, chnls=-1,
+                                   dilation=dil, stride=stride,
+                                   reflect_bounds=reflect_bounds,
+                                   use_k=use_k,use_adj=use_adj,
+                                   use_search_abs=use_search_abs,
+                                   exact=exact)
+        return xsearch
+
+    def get_wsearch(self,fflow,bflow):
+        oh0,ow0,oh1,ow1 = 0,0,0,0
+        stride,dil = self.stride,1
+        k,ps,ws,wt,pt = self.k,self.ps,self.ws,self.wt,1
+        reflect_bounds,use_adj = False,True
+        use_k,exact = not(ws == -1),self.exact
+        use_search_abs = ws == -1
+        xsearch = dnls.search.CrossSearchNl(fflow, bflow, k, ps, pt, ws, wt,
                                              oh0, ow0, oh1, ow1, chnls=-1,
                                              dilation=dil, stride=stride,
                                              reflect_bounds=reflect_bounds,
@@ -282,6 +298,7 @@ class WindowAttentionAugmented(nn.Module):
 
         # -- init functions --
         fflow,bflow = self.get_flows(flows,x.shape)
+        print("hi.")
         xsearch = self.get_xsearch(fflow,bflow)
         wpsum = self.get_wpsum()
         fold = dnls.ifold.iFold(vshape,coords,stride=stride,dilation=dil,
@@ -369,7 +386,7 @@ class WindowAttentionAugmented(nn.Module):
             # -- final xform --
             x = self.proj(x)
             # x = self.se_layer(x)
-            x = self.proj_drop(x)
+            # x = self.proj_drop(x)
             x = rearrange(x,'b (ph pw) c -> b 1 1 c ph pw ',ph=ps,pw=ps)
             x = x.contiguous()
             ones = th.ones_like(x)
